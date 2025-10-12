@@ -55,9 +55,7 @@ ui <- fluidPage(
       downloadButton("download_monthly_trend", "Monthly Trend", style = "margin-bottom: 5px; width: 100%;"),
       downloadButton("download_daily_depth", "Daily Depth", style = "margin-bottom: 5px; width: 100%;"),
       downloadButton("download_monthly_depth", "Monthly Depth", style = "margin-bottom: 5px; width: 100%;"),
-      downloadButton("download_freq_province", "Frequency by Province", style = "margin-bottom: 5px; width: 100%;"),
-      downloadButton("download_all_plots", "Download All Plots (ZIP)",
-                     class = "btn-danger", style = "margin-top: 10px; width: 100%;")
+      downloadButton("download_freq_province", "Frequency by Province", style = "margin-bottom: 5px; width: 100%;")
     ),
 
     mainPanel(
@@ -132,7 +130,7 @@ server <- function(input, output, session) {
     req(file.exists("default_data.csv"))
     rv$earthquake_data <- read.csv("default_data.csv", stringsAsFactors = FALSE) %>%
       mutate(
-        Date = as.Date(Date),
+        Date = as.Date(Date, "%d/%m/%Y"),
         Mag_scale = factor(Mag_scale, levels = sort(unique(Mag_scale)))
       )
 
@@ -155,8 +153,8 @@ server <- function(input, output, session) {
   })
 
   # Web scraping function (same as original code)
-  scrape_phivolcs_data <- function() {
-    showModal(modalDialog("Scraping data from PHIVOLCS... This may take a few minutes.",
+  scrape_phivolcs_data <- function(start_date = as.Date("2025-10-11"), start_time = "17:00") {
+    showModal(modalDialog("Scraping latest data from PHIVOLCS... This may take a moment.",
                           footer = NULL, easyClose = FALSE))
 
     # Define standardized column names
@@ -213,23 +211,24 @@ server <- function(input, output, session) {
       })
     }
 
-    years <- 2017:2025
+    # Only scrape from the current month onwards
+    current_year <- as.integer(format(Sys.Date(), "%Y"))
+    current_month <- format(Sys.Date(), "%B")
+
     months <- c("January", "February", "March", "April", "May", "June",
                 "July", "August", "September", "October", "November", "December")
 
+    current_month_index <- which(months == current_month)
+
     all_data <- list()
 
-    # Loop through archive pages
-    for (year in years) {
-      for (month in months) {
-        url <- sprintf("https://earthquake.phivolcs.dost.gov.ph/EQLatest-Monthly/%d/%d_%s.html",
-                       year, year, month)
-        tbl <- extract_phivolcs_table(url, year, month)
-        if (!is.null(tbl)) all_data[[paste0(year, "_", month)]] <- tbl
-      }
-    }
+    # Scrape current month's archive if available
+    archive_url <- sprintf("https://earthquake.phivolcs.dost.gov.ph/EQLatest-Monthly/%d/%d_%s.html",
+                           current_year, current_year, current_month)
+    archive_tbl <- extract_phivolcs_table(archive_url, current_year, current_month)
+    if (!is.null(archive_tbl)) all_data[["archive"]] <- archive_tbl
 
-    # Add latest data
+    # Scrape latest data from main page
     latest_url <- "https://earthquake.phivolcs.dost.gov.ph/"
     latest_tbl <- extract_phivolcs_table(latest_url)
 
@@ -246,20 +245,22 @@ server <- function(input, output, session) {
           mutate(Year = as.integer(inferred_year), Month = inferred_month)
       } else {
         latest_tbl <- latest_tbl %>%
-          mutate(Year = max(years), Month = NA)
+          mutate(Year = current_year, Month = current_month)
       }
       all_data[["latest"]] <- latest_tbl
     }
 
     # Combine and clean data
-    earthquake_data <- bind_rows(all_data) %>%
-      dplyr::filter(
-        Mag >= 0,
-        Location != "Location",
-        Location != "Taiwan Region",
-        !is.na(as.numeric(Latitude)),
-        !is.na(as.numeric(Longitude))
-      ) %>%
+    earthquake_data <- bind_rows(all_data)
+
+    # Check if we have any data before proceeding
+    if (nrow(earthquake_data) == 0) {
+      removeModal()
+      showNotification("No new earthquake data found.", type = "warning")
+      return(NULL)
+    }
+
+    earthquake_data <- earthquake_data %>%
       mutate(
         Date_str = str_extract(`Date - Time (Philippine Time)`, "^\\d{1,2}\\s+\\w+\\s+\\d{4}"),
         Date = parse_date_time(Date_str, orders = c("d b Y", "d B Y")),
@@ -273,6 +274,19 @@ server <- function(input, output, session) {
         `Depth_km` = as.numeric(`Depth_km`),
         Mag = as.numeric(Mag)
       )
+
+    # Now filter after all columns are properly created
+    earthquake_data <- earthquake_data %>%
+      dplyr::filter(
+        Mag >= 0,
+        Location != "Location",
+        Location != "Taiwan Region",
+        !is.na(as.numeric(Latitude)),
+        !is.na(as.numeric(Longitude))
+      ) %>%
+      mutate(DateTime = as.POSIXct(paste(Date, Time), format = "%Y-%m-%d %H:%M")) %>%
+      filter(DateTime > as.POSIXct(paste(start_date, start_time), format = "%Y-%m-%d %H:%M")) %>%
+      select(-DateTime)
 
     # PHIVOLCS Earthquake Intensity Scale
     peis <- c("1-1.9: Scarcely Perceptible", "2-2.9: Slightly Felt",
@@ -299,8 +313,8 @@ server <- function(input, output, session) {
           str_replace_all("\\s*\\)\\s*\\)", ")") %>%
           str_replace_all("\\s{2,}", " ") %>%
           str_squish(),
-        `Distance to Reference (km)` = as.numeric(str_extract(Location, "^\\s*\\d+")),
-        `Direction to Reference` = str_extract(Location, "(?<=km\\s)(.*?)(?=\\s+of)") %>%
+        Distance_to_Reference_km = as.numeric(str_extract(Location, "^\\s*\\d+")),
+        Direction_to_Reference = str_extract(Location, "(?<=km\\s)(.*?)(?=\\s+of)") %>%
           str_replace_all("\\s+", " ") %>%
           str_squish(),
         Location2 = str_extract(Location, "(?<= of )[^of]+\\([^\\)]+\\)$") %>%
@@ -355,8 +369,8 @@ server <- function(input, output, session) {
     # Select final columns
     earthquake_data <- earthquake_data %>%
       select(Date, Month, Day, Year, Time, Latitude, Longitude,
-             `Depth_km`, Mag, Mag_scale, `Distance to Reference (km)`,
-             `Direction to Reference`, City_Municipality, Province)
+             `Depth_km`, Mag, Mag_scale, Distance_to_Reference_km,
+             Direction_to_Reference, City_Municipality, Province)
 
     removeModal()
     return(earthquake_data)
@@ -364,9 +378,22 @@ server <- function(input, output, session) {
 
   # Handle "Use Latest Data" button
   observeEvent(input$use_latest, {
-    rv$latest_data <- scrape_phivolcs_data()
+    # Scrape only new data from October 12, 2025, 12:00 AM onwards
+    rv$latest_data <- scrape_phivolcs_data(start_date = as.Date("2025-10-12"), start_time = "00:00")
+
+    # Combine default data with latest data
+    default_data <- read.csv("default_data.csv", stringsAsFactors = FALSE) %>%
+      mutate(
+        Date = as.Date(Date, "%d/%m/%Y"),
+        Mag_scale = factor(Mag_scale, levels = sort(unique(Mag_scale)))
+      )
+
+    # Bind the rows
+    rv$earthquake_data <- bind_rows(default_data, rv$latest_data) %>%
+      arrange(desc(Date), desc(Time)) %>% # Sort by date and time descending
+      mutate(Year = as.integer(Year))
+
     rv$use_latest <- TRUE
-    rv$earthquake_data <- rv$latest_data
 
     # Update filters
     years <- sort(unique(rv$earthquake_data$Year))
@@ -406,18 +433,22 @@ server <- function(input, output, session) {
   # Filtered data
   filtered_data <- reactive({
     req(rv$earthquake_data)
-
     data <- rv$earthquake_data
 
-    # Filter by year
-    if (is.null(input$year_filter) || length(input$year_filter) == 0) {
-      # If nothing is checked, return NULL (no plot)
-      return(NULL)
-    } else if (!"All" %in% input$year_filter) {
-      # If specific years are selected (not "All"), filter by those years
-      data <- data %>% filter(Year %in% as.integer(input$year_filter))
+    # If input$year_filter is NULL or empty, treat it as "All"
+    yr_sel <- input$year_filter
+    if (is.null(yr_sel) || length(yr_sel) == 0) {
+      # treat as "All" -> don't filter by year
+      # (no action needed, keep 'data' as-is)
+    } else if (!("All" %in% yr_sel)) {
+      # Filter by the selected years (coerce safely to integers)
+      years_int <- suppressWarnings(as.integer(yr_sel))
+      years_int <- years_int[!is.na(years_int)]
+      if (length(years_int) > 0) {
+        data <- data %>% filter(Year %in% years_int)
+      }
     }
-    # If "All" is selected, use all data (no filtering needed)
+    # If "All" is selected, leave 'data' unchanged
 
     # Filter by province
     if (!is.null(input$province_filter) && length(input$province_filter) > 0) {
@@ -486,7 +517,7 @@ server <- function(input, output, session) {
     req(filtered_data())
 
     daily_trend <- filtered_data() %>%
-      mutate(Date = as.Date(Date)) %>%
+      # mutate(Date = as.Date(Date)) %>%
       group_by(Date) %>%
       summarise(mean_mag = mean(Mag, na.rm = TRUE),
                 max_mag = max(Mag, na.rm = TRUE),
@@ -514,8 +545,8 @@ server <- function(input, output, session) {
     req(filtered_data())
 
     monthly_trend <- filtered_data() %>%
-      mutate(Date = as.Date(Date),
-             YearMonth = floor_date(Date, "month")) %>%
+      mutate(#Date = as.Date(Date),
+        YearMonth = floor_date(Date, "month")) %>%
       group_by(YearMonth) %>%
       summarise(mean_mag = mean(Mag, na.rm = TRUE),
                 max_mag = max(Mag, na.rm = TRUE),
@@ -543,6 +574,7 @@ server <- function(input, output, session) {
     req(filtered_data())
 
     daily_depth <- filtered_data() %>%
+      # mutate(Date = as.Date(Date)) %>%
       rename(depth_km = "Depth_km") %>%
       group_by(Date) %>%
       summarise(avg_depth = mean(depth_km, na.rm = TRUE),
@@ -573,6 +605,7 @@ server <- function(input, output, session) {
     req(filtered_data())
 
     monthly_depth <- filtered_data() %>%
+      # mutate(Date = as.Date(Date)) %>%
       rename(depth_km = "Depth_km") %>%
       mutate(YearMonth = floor_date(Date, "month")) %>%
       group_by(YearMonth) %>%
@@ -605,7 +638,7 @@ server <- function(input, output, session) {
 
     daily_counts <- filtered_data() %>%
       filter(!is.na(Province)) %>%
-      mutate(Date = as.Date(Date)) %>%
+      # mutate(Date = as.Date(Date)) %>%
       group_by(Province, Date) %>%
       summarise(Daily_Count = n(), .groups = "drop")
 
@@ -631,7 +664,13 @@ server <- function(input, output, session) {
 
   # Data table
   output$data_table <- renderDT({
-    datatable(filtered_data(),
+    req(filtered_data())
+
+    # Format the data for display
+    display_data <- filtered_data() %>%
+      mutate(Date = format(Date, "%d/%m/%y"))  # Format date properly
+
+    datatable(display_data,
               options = list(pageLength = 25, scrollX = TRUE),
               filter = "top")
   })
@@ -648,11 +687,23 @@ server <- function(input, output, session) {
 
   output$download_latest <- downloadHandler(
     filename = function() {
-      paste0("latest_data_", Sys.Date(), ".csv")
+      paste0("combined_data_", Sys.Date(), ".csv")
     },
     content = function(file) {
       req(rv$latest_data)
-      write.csv(rv$latest_data, file, row.names = FALSE)
+
+      # Load default data
+      default_data <- read.csv("default_data.csv", stringsAsFactors = FALSE) %>%
+        mutate(
+          Date = as.Date(Date, "%d/%m/%y"),
+          Mag_scale = factor(Mag_scale, levels = sort(unique(Mag_scale)))
+        )
+
+      # Combine default data with latest data
+      combined_data <- bind_rows(default_data, rv$latest_data) %>%
+        arrange(desc(Date), desc(Time))
+
+      write.csv(combined_data, file, row.names = FALSE)
     }
   )
 
@@ -715,7 +766,7 @@ server <- function(input, output, session) {
     },
     content = function(file) {
       daily_trend <- filtered_data() %>%
-        mutate(Date = as.Date(Date)) %>%
+        # mutate(Date = as.Date(Date)) %>%
         group_by(Date) %>%
         summarise(mean_mag = mean(Mag, na.rm = TRUE),
                   max_mag = max(Mag, na.rm = TRUE),
@@ -747,8 +798,8 @@ server <- function(input, output, session) {
     },
     content = function(file) {
       monthly_trend <- filtered_data() %>%
-        mutate(Date = as.Date(Date),
-               YearMonth = floor_date(Date, "month")) %>%
+        mutate(#Date = as.Date(Date),
+          YearMonth = floor_date(Date, "month")) %>%
         group_by(YearMonth) %>%
         summarise(mean_mag = mean(Mag, na.rm = TRUE),
                   max_mag = max(Mag, na.rm = TRUE),
@@ -850,7 +901,7 @@ server <- function(input, output, session) {
     content = function(file) {
       daily_counts <- filtered_data() %>%
         filter(!is.na(Province)) %>%
-        mutate(Date = as.Date(Date)) %>%
+        # mutate(Date = as.Date(Date)) %>%
         group_by(Province, Date) %>%
         summarise(Daily_Count = n(), .groups = "drop")
 
@@ -874,228 +925,6 @@ server <- function(input, output, session) {
               panel.grid.minor.y = element_blank())
 
       ggsave(file, plot = p, width = input$plot_width, height = input$plot_height, dpi = input$plot_dpi, bg = "white")
-    }
-  )
-
-  # Download all plots as ZIP
-  output$download_all_plots <- downloadHandler(
-    filename = function() {
-      paste0("all_earthquake_plots_", Sys.Date(), ".zip")
-    },
-    content = function(file) {
-      # Create temporary directory
-      temp_dir <- tempdir()
-
-      # Generate all plots
-      plots <- list(
-        list(name = "earthquake_map.png", data = filtered_data()),
-        list(name = "daily_magnitude_trend.png", data = filtered_data()),
-        list(name = "monthly_magnitude_trend.png", data = filtered_data()),
-        list(name = "daily_depth.png", data = filtered_data()),
-        list(name = "monthly_depth.png", data = filtered_data()),
-        list(name = "frequency_by_province.png", data = filtered_data())
-      )
-
-      files_to_zip <- c()
-
-      # Map plot
-      eq_plot_data <- filtered_data() %>%
-        rename(latitude = Latitude,
-               longitude = Longitude,
-               magnitude = Mag) %>%
-        mutate(latitude = as.numeric(latitude),
-               longitude = as.numeric(longitude),
-               magnitude = as.numeric(magnitude)) %>%
-        filter(!is.na(latitude) & !is.na(longitude) & !is.na(magnitude))
-
-      min_mag <- min(eq_plot_data$magnitude, na.rm = TRUE)
-      max_mag <- max(eq_plot_data$magnitude, na.rm = TRUE)
-      max_label <- sprintf("%.1f (max)", max_mag)
-
-      p1 <- ggplot() +
-        geom_sf(data = ph_map, fill = "white", color = "black", size = 0.4) +
-        geom_point(data = eq_plot_data,
-                   aes(x = longitude, y = latitude, color = magnitude, size = magnitude),
-                   alpha = 0.7) +
-        scale_color_gradientn(
-          colors = c("blue", "green", "yellow", "orange", "red"),
-          limits = c(min_mag, max_mag),
-          breaks = c(min_mag, (min_mag + max_mag) / 2, max_mag),
-          labels = c(sprintf("%.1f", min_mag),
-                     sprintf("%.1f", (min_mag + max_mag) / 2),
-                     max_label),
-          name = paste0("Magnitude (", sprintf("%.1f", min_mag), "–", sprintf("%.1f", max_mag), ")")
-        ) +
-        guides(size = "none") +
-        coord_sf(xlim = c(115, 132), ylim = c(0, 25)) +
-        theme_minimal() +
-        labs(
-          title = "Earthquakes in the Philippines",
-          subtitle = paste("Magnitude categories:", paste(levels(eq_plot_data$Mag_scale), collapse = ", ")),
-          caption = paste0("Earthquake magnitude thresholds: ", sprintf("%.1f", min_mag), " to ", sprintf("%.1f", max_mag)),
-          x = "Longitude (ºE)",
-          y = "Latitude (ºN)"
-        ) +
-        theme(
-          legend.position = "right",
-          plot.title = element_text(face = "bold", size = 14),
-          plot.subtitle = element_text(size = 10)
-        )
-
-      file1 <- file.path(temp_dir, "earthquake_map.png")
-      ggsave(file1, plot = pX, width = input$plot_width, height = input$plot_height, dpi = input$plot_dpi, bg = "white")
-      files_to_zip <- c(files_to_zip, file1)
-
-      # Daily trend
-      daily_trend <- filtered_data() %>%
-        mutate(Date = as.Date(Date)) %>%
-        group_by(Date) %>%
-        summarise(mean_mag = mean(Mag, na.rm = TRUE),
-                  max_mag = max(Mag, na.rm = TRUE),
-                  min_mag = min(Mag, na.rm = TRUE))
-
-      p2 <- ggplot(daily_trend, aes(x = Date)) +
-        geom_line(aes(y = mean_mag), color = "steelblue", linewidth = 0.8) +
-        geom_point(aes(y = max_mag), color = "red", alpha = 0.6, size = 1.2) +
-        geom_point(aes(y = min_mag), color = "darkgreen", alpha = 0.6, size = 1.2) +
-        geom_smooth(aes(y = mean_mag), color = "orange", se = FALSE,
-                    linewidth = 1.2, linetype = "longdash") +
-        labs(
-          title = "Daily Earthquake Magnitude Trends in the Philippines",
-          subtitle = "Blue line = average/day, orange = trend, red = highest magnitude, green = lowest magnitude per day",
-          x = "Year",
-          y = "Magnitude"
-        ) +
-        theme_minimal(base_size = 12) +
-        theme(plot.title = element_text(face = "bold", size = 14),
-              axis.text.x = element_text(angle = 0, hjust = 1))
-
-      file2 <- file.path(temp_dir, "daily_magnitude_trend.png")
-      ggsave(file2, plot = pX, width = input$plot_width, height = input$plot_height, dpi = input$plot_dpi, bg = "white")
-      files_to_zip <- c(files_to_zip, file2)
-
-      # Monthly trend
-      monthly_trend <- filtered_data() %>%
-        mutate(Date = as.Date(Date),
-               YearMonth = floor_date(Date, "month")) %>%
-        group_by(YearMonth) %>%
-        summarise(mean_mag = mean(Mag, na.rm = TRUE),
-                  max_mag = max(Mag, na.rm = TRUE),
-                  min_mag = min(Mag, na.rm = TRUE))
-
-      p3 <- ggplot(monthly_trend, aes(x = YearMonth)) +
-        geom_line(aes(y = mean_mag), color = "steelblue", linewidth = 1) +
-        geom_point(aes(y = max_mag), color = "red", size = 2, alpha = 0.8) +
-        geom_point(aes(y = min_mag), color = "darkgreen", size = 2, alpha = 0.8) +
-        geom_smooth(aes(y = mean_mag), color = "orange", se = FALSE,
-                    linewidth = 1.2, linetype = "longdash") +
-        labs(
-          title = "Monthly Earthquake Magnitude Trends in the Philippines",
-          subtitle = "Blue line = average/month, orange = trend, red = highest magnitude, green = lowest magnitude per month",
-          x = "Year",
-          y = "Magnitude"
-        ) +
-        theme_minimal(base_size = 12) +
-        theme(plot.title = element_text(face = "bold", size = 14),
-              axis.text.x = element_text(angle = 0, hjust = 1))
-
-      file3 <- file.path(temp_dir, "monthly_magnitude_trend.png")
-      ggsave(file3, plot = pX, width = input$plot_width, height = input$plot_height, dpi = input$plot_dpi, bg = "white")
-      files_to_zip <- c(files_to_zip, file3)
-
-      # Daily depth
-      daily_depth <- filtered_data() %>%
-        rename(depth_km = "Depth_km") %>%
-        group_by(Date) %>%
-        summarise(avg_depth = mean(depth_km, na.rm = TRUE),
-                  min_depth = min(depth_km, na.rm = TRUE),
-                  max_depth = max(depth_km, na.rm = TRUE),
-                  avg_mag = mean(Mag, na.rm = TRUE),
-                  n_quakes = n())
-
-      p4 <- ggplot(daily_depth, aes(x = Date)) +
-        geom_point(aes(y = avg_depth, color = avg_mag), size = 2, alpha = 0.7) +
-        geom_point(aes(y = min_depth), shape = 25, fill = "blue", color = "blue", size = 1.5) +
-        geom_point(aes(y = max_depth), shape = 24, fill = "red", color = "red", size = 1.5) +
-        scale_y_reverse() +
-        scale_color_gradient(low = "yellow", high = "red", name = "Avg Magnitude") +
-        labs(
-          title = "Daily Earthquake Depths in the Philippines",
-          subtitle = "Lower points indicate deeper depth of the earthquake's focus (hypocenter)",
-          x = "Date",
-          y = "Depth (km, inverted) [x-axis = 0 is to mimick Earth's surface]"
-        ) +
-        theme_minimal(base_size = 12) +
-        theme(plot.title = element_text(face = "bold", size = 14),
-              axis.text.x = element_text(angle = 0, hjust = 1))
-
-      file4 <- file.path(temp_dir, "daily_depth.png")
-      ggsave(file4, plot = pX, width = input$plot_width, height = input$plot_height, dpi = input$plot_dpi, bg = "white")
-      files_to_zip <- c(files_to_zip, file4)
-
-      # Monthly depth
-      monthly_depth <- filtered_data() %>%
-        rename(depth_km = "Depth_km") %>%
-        mutate(YearMonth = floor_date(Date, "month")) %>%
-        group_by(YearMonth) %>%
-        summarise(avg_depth = mean(depth_km, na.rm = TRUE),
-                  min_depth = min(depth_km, na.rm = TRUE),
-                  max_depth = max(depth_km, na.rm = TRUE),
-                  avg_mag = mean(Mag, na.rm = TRUE),
-                  n_quakes = n())
-
-      p5 <- ggplot(monthly_depth, aes(x = YearMonth)) +
-        geom_point(aes(y = avg_depth, color = avg_mag), size = 3, alpha = 0.8) +
-        geom_point(aes(y = min_depth), shape = 25, fill = "blue", color = "blue", size = 2) +
-        geom_point(aes(y = max_depth), shape = 24, fill = "red", color = "red", size = 2) +
-        scale_y_reverse() +
-        scale_color_gradient(low = "yellow", high = "red", name = "Avg Magnitude") +
-        labs(
-          title = "Monthly Earthquake Depths in the Philippines",
-          subtitle = "Lower points indicate deeper depth of the earthquake's focus (hypocenter)",
-          x = "Month",
-          y = "Depth (km, inverted) [x-axis = 0 is to mimick Earth's surface]"
-        ) +
-        theme_minimal(base_size = 12) +
-        theme(plot.title = element_text(face = "bold", size = 14),
-              axis.text.x = element_text(angle = 0, hjust = 1))
-
-      file5 <- file.path(temp_dir, "monthly_depth.png")
-      ggsave(file5, plot = pX, width = input$plot_width, height = input$plot_height, dpi = input$plot_dpi, bg = "white")
-      files_to_zip <- c(files_to_zip, file5)
-
-      # Frequency by province
-      daily_counts <- filtered_data() %>%
-        filter(!is.na(Province)) %>%
-        mutate(Date = as.Date(Date)) %>%
-        group_by(Province, Date) %>%
-        summarise(Daily_Count = n(), .groups = "drop")
-
-      province_order <- daily_counts %>%
-        group_by(Province) %>%
-        summarise(Total = sum(Daily_Count, na.rm = TRUE)) %>%
-        arrange(desc(Total)) %>%
-        pull(Province)
-
-      p6 <- ggplot(daily_counts, aes(x = Daily_Count, y = factor(Province, levels = rev(province_order)))) +
-        geom_col(fill = "steelblue") +
-        labs(
-          title = "Earthquake Frequency by Province",
-          # subtitle = "January 2017 to October 11, 2025, 5:00 PM",
-          x = "Earthquake Frequency",
-          y = "Province"
-        ) +
-        theme_minimal(base_size = 12) +
-        theme(plot.title = element_text(face = "bold", size = 14),
-              panel.grid.major.y = element_blank(),
-              panel.grid.minor.y = element_blank())
-
-      file6 <- file.path(temp_dir, "frequency_by_province.png")
-      ggsave(file6, plot = pX, width = input$plot_width, height = input$plot_height, dpi = input$plot_dpi, bg = "white")
-      files_to_zip <- c(files_to_zip, file6)
-
-      # Create ZIP file
-      zip::zip(file, files = basename(files_to_zip), root = temp_dir)
     }
   )
 }
