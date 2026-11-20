@@ -1,980 +1,555 @@
-# PHIVOLCS Earthquake Data Visualization Shiny App
-# Install and load required packages
-pacman::p_load(shiny, rvest, dplyr, stringr, purrr, lubridate,
-               ggplot2, sf, DT, zip)
+# =============================================================================
+# Philippine Earthquake Explorer
+# -----------------------------------------------------------------------------
+# A Shiny app for exploring earthquakes recorded by the Philippine Institute of
+# Volcanology and Seismology (PHIVOLCS-DOST) from January 2017 onwards.
+#
+# Author : John Lennon L. Calorio
+# Source : https://github.com/jllcalorio/Philippine-Quake-Viz-ShinyApp
+# License: MIT
+#
+# Project layout
+#   app.R             user interface and server logic (this file)
+#   R/data_prep.R     reading, cleaning and classifying the data
+#   R/scrape.R        downloading the latest events from the PHIVOLCS website
+#   R/plots.R         charts and summary tables
+#   default_data.csv  bundled earthquake catalogue (2017 to mid-2026)
+#   ph_map.rds        Philippine coastline (Natural Earth, 1:10m), sf object
+#
+# Shiny loads every file in R/ automatically before running this file.
+# =============================================================================
 
-# Define UI
-ui <- fluidPage(
-  titlePanel("PHIVOLCS Earthquake Data Visualization (2017 onwards)"),
+library(shiny)
+library(bslib)
+library(dplyr)
+library(stringr)
+library(lubridate)
+library(rvest)
+library(ggplot2)
+library(sf)
+library(DT)
 
-  sidebarLayout(
-    sidebarPanel(
-      width = 3,
+# Links (APP_URL, REPO_URL, PHIVOLCS_URL) are defined in R/about.R.
 
-      # Data source buttons
-      h4("Data Source"),
-      downloadButton("download_default", "Download Default Data",
-                     class = "btn-primary", style = "margin-bottom: 10px; width: 100%;"),
-      actionButton("use_latest", "Use Latest Data",
-                   class = "btn-warning", style = "margin-bottom: 10px; width: 100%;"),
-      conditionalPanel(
-        condition = "input.use_latest > 0",
-        downloadButton("download_latest", "Download Latest Data",
-                       class = "btn-success", style = "margin-bottom: 20px; width: 100%;")
-      ),
+# -----------------------------------------------------------------------------
+# Load data once per R process (shared by all user sessions)
+# -----------------------------------------------------------------------------
+DEFAULT_STD <- read_default_data("default_data.csv")
+DEFAULT_DATA <- clean_eq_data(DEFAULT_STD)
+PH_OUTLINE <- sf_to_polygon_df(readRDS("ph_map.rds"))
 
-      hr(),
+MAG_MAX <- ceiling(max(DEFAULT_DATA$Mag) * 10) / 10 + 0.1
+DEFAULT_MIN_MAG <- 1
 
-      # Filters
-      h4("Filters"),
-      checkboxGroupInput("year_filter", "Select Year(s):",
-                         choices = c("All"),
-                         selected = "All"),
-
-      selectizeInput("province_filter", "Select Province(s):",
-                     choices = NULL,
-                     multiple = TRUE,
-                     options = list(placeholder = "Type or select provinces...")),
-
-      fluidRow(
-        column(6, numericInput("mag_min", "Min Magnitude:", value = 5, min = 0, max = 9, step = 0.1)),
-        column(6, numericInput("mag_max", "Max Magnitude:", value = 9, min = 0, max = 9, step = 0.1))
-      ),
-
-      hr(),
-
-      # Download plot buttons
-      h4("Download Plots"),
-
-      # Added input fields for plot dimensions and resolution
-      numericInput("plot_width", "Plot Width (inches):", value = 15, min = 1, step = 1),
-      numericInput("plot_height", "Plot Height (inches):", value = 15, min = 1, step = 1),
-      numericInput("plot_dpi", "Plot DPI (Resolution):", value = 300, min = 50, step = 50),
-
-      downloadButton("download_map", "Map Plot", style = "margin-bottom: 5px; width: 100%;"),
-      downloadButton("download_daily_trend", "Daily Trend", style = "margin-bottom: 5px; width: 100%;"),
-      downloadButton("download_monthly_trend", "Monthly Trend", style = "margin-bottom: 5px; width: 100%;"),
-      downloadButton("download_daily_depth", "Daily Depth", style = "margin-bottom: 5px; width: 100%;"),
-      downloadButton("download_monthly_depth", "Monthly Depth", style = "margin-bottom: 5px; width: 100%;"),
-      downloadButton("download_freq_province", "Frequency by Province", style = "margin-bottom: 5px; width: 100%;")
+# -----------------------------------------------------------------------------
+# Small UI helpers
+# -----------------------------------------------------------------------------
+plot_card <- function(title, output_id, download_id, height = "560px", controls = NULL,
+                      click = NULL, footer = NULL) {
+  card(
+    full_screen = TRUE,
+    card_header(
+      class = "d-flex justify-content-between align-items-center flex-wrap gap-2",
+      title,
+      downloadButton(download_id, "PNG", class = "btn-sm btn-outline-secondary",
+                     title = "Download this chart as a PNG image (size set in the sidebar)")
     ),
-
-    mainPanel(
-      width = 9,
-      tabsetPanel(
-        tabPanel("Earthquakes Map", plotOutput("map_plot", height = "1000px")),
-        tabPanel("Daily Magnitude Trend", plotOutput("daily_trend_plot", height = "1000px")),
-        tabPanel("Monthly Magnitude Trend", plotOutput("monthly_trend_plot", height = "1000px")),
-        tabPanel("Daily Depth", plotOutput("daily_depth_plot", height = "1000px")),
-        tabPanel("Monthly Depth", plotOutput("monthly_depth_plot", height = "1000px")),
-        tabPanel("EQ Frequency by Province", plotOutput("freq_province_plot", height = "1000px")),
-        tabPanel("Data Table", DTOutput("data_table")),
-        tabPanel("About & Contribute",
-                 fluidRow(
-                   column(12,
-                          h3("About This Shiny App"),
-                          p(strong("The Philippines, situated along the volatile Pacific Ring of Fire, experiences frequent and ongoing seismic activity.")),
-                          p("This dashboard provides a comprehensive visualization and analysis of earthquake data sourced directly from the Philippine Institute of Volcanology and Seismology (PHIVOLCS) from 2017."),
-                          p("It allows users to filter, visualize, and download trends in magnitude, depth, and frequency across various provinces, aiding in geological study and risk awareness."),
-                          hr(),
-
-                          h3("Author & Contact"),
-                          p(strong("John Lennon L. Calorio")),
-                          p("Health Data Scientist and Statistician"),
-                          p("Email: ", a(href = "mailto:jllcalorio@gmail.com", "jllcalorio@gmail.com")),
-                          p("Current Position: Senior Statistician at the ", a(href = "https://web.facebook.com/dmsfiCRD", "Center for Research and Development"), ", ", a(href = "https://web.facebook.com/DavaoMedical", "Davao Medical School Foundation, Inc.")),
-
-                          h3("Contribute to this Shiny App"),
-                          p("GitHub repository of this Shiny App: ", a(href = "https://github.com/jllcalorio/Philippine-Quake-Viz-ShinyApp", "https://github.com/jllcalorio/Philippine-Quake-Viz-ShinyApp")),
-
-                          h3("Share this Shiny App"),
-                          p("Shiny App link: ", a(href = "https://jllcalorio.shinyapps.io/earthquakes_in_ph/", "https://jllcalorio.shinyapps.io/earthquakes_in_ph/")),
-
-                          hr(),
-
-                          h3("Acknowledgements & Methods"),
-                          p("Thanks to ", strong("PHIVOLCS"), " for making the data available for everyone. The data in this app is obtained by web scraping from their website: ", a(href = "https://earthquake.phivolcs.dost.gov.ph/", "https://earthquake.phivolcs.dost.gov.ph/")),
-
-                          h4("Things I did to make this happen:"),
-                          tags$ul(
-                            tags$li("Web scraping"),
-                            tags$li("Data manipulation (auto and manual)"),
-                            tags$li("Data analysis and visualization using R"),
-                            tags$li("Deployment via ShinyApps")
-                          ),
-
-                          h4("R packages used:"),
-                          tags$ul(
-                            tags$li("shiny, rvest, dplyr, stringr, purrr, lubridate,"),
-                            tags$li("ggplot2, sf, DT, zip")
-                          ),
-
-                          h4("Stay safe everyone!")
-                   )
-                 )
-        )
-      )
-    )
-  )
-)
-
-# Define server logic
-server <- function(input, output, session) {
-
-  # Reactive values to store data
-  rv <- reactiveValues(
-    earthquake_data = NULL,
-    latest_data = NULL,
-    use_latest = FALSE
-  )
-
-  # Load default data on startup
-  observe({
-    req(file.exists("default_data.csv"))
-    
-    # ponytail: load to a standard local variable first. Reading from rv$earthquake_data
-    # inside this observe creates a reactive dependency, causing it to re-run and overwrite 
-    # everything when the 'Use Latest Data' button updates the reactive value.
-    startup_data <- read.csv("default_data.csv", stringsAsFactors = FALSE) |>
-      mutate(
-        Date = as.Date(Date, "%d %m %Y"),
-        Year = as.integer(Year),
-        Mag_scale = factor(Mag_scale, levels = sort(unique(Mag_scale)))
-      )
-
-    rv$earthquake_data <- startup_data
-
-    # Dynamically extract year choices from local data, keeping this block isolated
-    years <- sort(unique(startup_data$Year))
-    updateCheckboxGroupInput(session, "year_filter",
-                             choices = c("All", as.character(years)),
-                             selected = "All")
-
-    # Update province filter choices
-    provinces <- sort(unique(startup_data$Province[!is.na(startup_data$Province)]))
-    updateSelectizeInput(session, "province_filter", choices = provinces)
-  })
-
-  # Web scraping function (same as original code)
-  scrape_phivolcs_data <- function(start_date = as.Date("2025-10-11"), start_time = "17:00") {
-    showModal(modalDialog("Scraping latest data from PHIVOLCS... This may take a moment.",
-                          footer = NULL, easyClose = FALSE))
-
-    # Define standardized column names
-    standard_cols <- c("Date - Time (Philippine Time)",
-                       "Latitude",
-                       "Longitude",
-                       "Depth_km",
-                       "Mag",
-                       "Location")
-
-    # Helper function to clean text
-    clean_text <- function(x) {
-      x |>
-        str_replace_all("\\s+", " ") |>
-        str_squish()
-    }
-
-    # Helper function to safely extract table from a URL
-    extract_phivolcs_table <- function(url, year = NA, month = NA) {
-      tryCatch({
-        page <- read_html(url)
-        tables <- page |> html_table(fill = TRUE)
-        if (length(tables) == 0) return(NULL)
-
-        tbl <- tables[[which.max(sapply(tables, nrow))]]
-        colnames(tbl) <- make.names(colnames(tbl), unique = TRUE)
-        tbl[] <- lapply(tbl, clean_text)
-
-        if (ncol(tbl) == 12) {
-          tbl1 <- tbl[, 1:6]
-          tbl2 <- tbl[, 7:12]
-          tbl_list <- list(tbl1, tbl2)
-          tbl_list <- lapply(tbl_list, function(t) {
-            if (ncol(t) >= 6) {
-              t <- t[, 1:6]
-              colnames(t) <- standard_cols
-              return(t)
-            } else {
-              return(NULL)
-            }
-          })
-          tbl <- bind_rows(tbl_list)
-        } else if (ncol(tbl) >= 6) {
-          tbl <- tbl[, 1:6]
-          colnames(tbl) <- standard_cols
-        } else {
-          return(NULL)
-        }
-
-        tbl |> mutate(Year = year, Month = month)
-      },
-      error = function(e) {
-        NULL
-      })
-    }
-
-    current_year <- as.integer(format(Sys.Date(), "%Y"))
-    current_month <- format(Sys.Date(), "%B")
-
-    months <- c("January", "February", "March", "April", "May", "June",
-                "July", "August", "September", "October", "November", "December")
-
-    current_month_index <- which(months == current_month)
-
-    # Derive starting year/month from start_date so we cover all missing months
-    scrape_yr  <- as.integer(format(start_date, "%Y"))
-    scrape_mo  <- as.integer(format(start_date, "%m"))
-
-    all_data <- list()
-
-    # Scrape every monthly archive from start_date's month through the current month
-    # ponytail: compare as YYYYMM integers for correct cross-year ordering
-    while (scrape_yr * 100 + scrape_mo <= current_year * 100 + current_month_index) {
-      month_name <- months[scrape_mo]
-      archive_url <- sprintf("https://earthquake.phivolcs.dost.gov.ph/EQLatest-Monthly/%d/%d_%s.html",
-                             scrape_yr, scrape_yr, month_name)
-      tbl <- extract_phivolcs_table(archive_url, scrape_yr, month_name)
-      if (!is.null(tbl)) all_data[[paste(scrape_yr, scrape_mo, sep = "-")]] <- tbl
-      scrape_mo <- scrape_mo + 1
-      if (scrape_mo > 12) { scrape_mo <- 1; scrape_yr <- scrape_yr + 1 }
-    }
-
-    # Scrape latest data from main page
-    latest_url <- "https://earthquake.phivolcs.dost.gov.ph/"
-    latest_tbl <- extract_phivolcs_table(latest_url)
-
-    if (!is.null(latest_tbl)) {
-      inferred_date <- latest_tbl[1, 1] |>
-        str_extract("\\b\\d{1,2}\\s+[A-Za-z]+\\s+\\d{4}\\b") |>
-        na.omit()
-
-      if (length(inferred_date) > 0) {
-        parsed_date <- as.Date(inferred_date[1], format = "%d %B %Y")
-        inferred_year <- format(parsed_date, "%Y")
-        inferred_month <- format(parsed_date, "%B")
-        latest_tbl <- latest_tbl |>
-          mutate(Year = as.integer(inferred_year), Month = inferred_month)
-      } else {
-        latest_tbl <- latest_tbl |>
-          mutate(Year = current_year, Month = current_month)
-      }
-      all_data[["latest"]] <- latest_tbl
-    }
-
-    # Combine and deduplicate (archive + main page can overlap)
-    earthquake_data <- bind_rows(all_data) |> distinct()
-
-    # Check if we have any data before proceeding
-    if (nrow(earthquake_data) == 0) {
-      removeModal()
-      showNotification("No new earthquake data found.", type = "warning")
-      return(NULL)
-    }
-
-    earthquake_data <- earthquake_data |>
-      mutate(
-        Date_str = str_extract(`Date - Time (Philippine Time)`, "^\\d{1,2}\\s+\\w+\\s+\\d{4}"),
-        Date = parse_date_time(Date_str, orders = c("d b Y", "d B Y")),
-        Day = as.integer(str_extract(`Date - Time (Philippine Time)`, "^\\d{1,2}")),
-        Time_12h = str_extract(`Date - Time (Philippine Time)`, "\\d{1,2}:\\d{2}\\s*[APap][Mm]"),
-        Time = format(parse_date_time(Time_12h, orders = "I:M p"), "%H:%M"),
-        Year = as.integer(Year),
-        `Depth_km` = ifelse(`Depth_km` %in% c("--", "< 001", "<001"), 0.00001, `Depth_km`),
-        Latitude = as.numeric(Latitude),
-        Longitude = as.numeric(Longitude),
-        `Depth_km` = as.numeric(`Depth_km`),
-        Mag = as.numeric(Mag)
-      )
-
-    # Now filter after all columns are properly created
-    earthquake_data <- earthquake_data |>
-      dplyr::filter(
-        Mag >= 0,
-        Location != "Location",
-        Location != "Taiwan Region",
-        !is.na(as.numeric(Latitude)),
-        !is.na(as.numeric(Longitude))
-      ) |>
-      mutate(DateTime = as.POSIXct(paste(Date, Time), format = "%Y-%m-%d %H:%M")) |>
-      filter(DateTime > as.POSIXct(paste(start_date, start_time), format = "%Y-%m-%d %H:%M")) |>
-      select(-DateTime)
-
-    # PHIVOLCS Earthquake Intensity Scale
-    peis <- c("1-1.9: Scarcely Perceptible", "2-2.9: Slightly Felt",
-              "3-3.9: Weak", "4-4.9: Moderately Strong",
-              "5-5.9: Strong", "6-6.9: Very Strong",
-              "7-7.9: Destructive", "8-8.9: Very Destructive",
-              "9-9.9: Devastating", ">10: Very Devastating")
-
-    earthquake_data <- earthquake_data |>
-      mutate(
-        Mag_scale = case_when(
-          Mag < 2 ~ peis[1], Mag < 3 ~ peis[2], Mag < 4 ~ peis[3],
-          Mag < 5 ~ peis[4], Mag < 6 ~ peis[5], Mag < 7 ~ peis[6],
-          Mag < 8 ~ peis[7], Mag < 9 ~ peis[8], Mag < 10 ~ peis[9],
-          Mag >= 10 ~ peis[10], TRUE ~ NA_character_
-        )
-      )
-
-    # Fix locations
-    earthquake_data <- earthquake_data |>
-      mutate(
-        Location = Location |>
-          str_replace_all("\\(\\s*\\(", "(") |>
-          str_replace_all("\\s*\\)\\s*\\)", ")") |>
-          str_replace_all("\\s{2,}", " ") |>
-          str_squish(),
-        Distance_to_Reference_km = as.numeric(str_extract(Location, "^\\s*\\d+")),
-        Direction_to_Reference = str_extract(Location, "(?<=km\\s)(.*?)(?=\\s+of)") |>
-          str_replace_all("\\s+", " ") |>
-          str_squish(),
-        Location2 = str_extract(Location, "(?<= of )[^of]+\\([^\\)]+\\)$") |>
-          str_squish(),
-        Location2 = if_else(is.na(Location2),
-                            str_extract(Location, "(?<= of ).*$") |> str_squish(),
-                            Location2),
-        City_Municipality = str_extract(Location2, "^[^(]+") |> str_trim(),
-        Province = str_extract(Location2, "(?<=\\()[^)]+(?=\\))") |> str_trim()
-      ) |>
-      mutate(Mag_scale = factor(Mag_scale, sort(unique(Mag_scale))))
-
-    # Province corrections
-    corrections <- c(
-      "Anao-oan" = "Anao-aon", "Agusan Del Norte" = "Agusan del Norte",
-      "Agusan De Sur" = "Agusan del Sur", "Agusan Del Sur" = "Agusan del Sur",
-      "Batanagas" = "Batangas", "Camarines Surl" = "Camarines Sur",
-      "CamarinesSur" = "Camarines Sur", "Cataduanes" = "Catanduanes",
-      "Compostella Valley" = "Compostela Valley", "Davao De Oro" = "Davao de Oro",
-      "Davao Del Norte" = "Davao del Norte", "Davao Del Sur" = "Davao del Sur",
-      "Davao Del Occidental" = "Davao Occidental", "Davao Occicental" = "Davao Occidental",
-      "Davao Occidenta" = "Davao Occidental", "Davao Occidentall" = "Davao Occidental",
-      "Davao Oreintal" = "Davao Oriental", "Davao Orientall" = "Davao Oriental",
-      "Davao Orinetal" = "Davao Oriental", "Dinagat" = "Dinagat Islands",
-      "Easter Samar" = "Eastern Samar", "Easterm Samar" = "Eastern Samar",
-      "Eastren Samar" = "Eastern Samar", "Eatern Samar" = "Eastern Samar",
-      "Island Garden City of Samal (Davao Del Norte" = "Island Garden City Of Samal",
-      "La union" = "La Union", "Lanao De Sur" = "Lanao del Sur",
-      "Lanao Del Sur" = "Lanao del Sur", "Lanao Del Nortel" = "Lanao del Norte",
-      "Lanao Del Norte" = "Lanao del Norte", "Masbate (Ticao Island" = "Masbate",
-      "Maguindanao Del Norte" = "Maguindanao del Norte",
-      "Maguindanao Del Sur" = "Maguindanao del Sur",
-      "Negros Occedental" = "Negros Occidental", "Northen Samar" = "Northern Samar",
-      "Nuevq Ecija" = "Nueva Ecija", "Nueva Viscaya" = "Nueva Vizcaya",
-      "Occ.mindoro" = "Occidental Mindoro", "Occidental" = "Occidental Mindoro",
-      "Oriemtal Mindoro" = "Oriental Mindoro", "Oriental" = "Davao Oriental",
-      "S.leyte" = "Southern Leyte", "Municipality Of Sarangani" = "Sarangani",
-      "Saragani" = "Sarangani", "Saranggani" = "Sarangani",
-      "South Cotobato" = "South Cotabato", "Sultan Kudaratl" = "Sultan Kudarat",
-      "Surigao De Norte" = "Surigao del Norte", "Surigao Del Norte" = "Surigao del Norte",
-      "Surigao de Sur" = "Surigao del Sur", "Surigao Sel Sur" = "Surigao del Sur",
-      "Surigao Del Sur" = "Surigao del Sur", "Tawi-Tawi" = "Tawi-tawi",
-      "Zambaoanga Del Norte" = "Zamboanga del Norte",
-      "Zamboanga Del Norte" = "Zamboanga del Norte",
-      "Zambonga Del Sur" = "Zamboanga del Sur",
-      "Zamboanga Del Sur" = "Zamboanga del Sur"
-    )
-
-    earthquake_data <- earthquake_data |>
-      mutate(Province = dplyr::recode(Province, !!!corrections))
-
-    # Select final columns
-    earthquake_data <- earthquake_data |>
-      select(Date, Month, Day, Year, Time, Latitude, Longitude,
-             `Depth_km`, Mag, Mag_scale, Distance_to_Reference_km,
-             Direction_to_Reference, City_Municipality, Province)
-    
-    removeModal()
-    return(earthquake_data)
-  }
-
-# Handle "Use Latest Data" button
-observeEvent(input$use_latest, {
-  default_head <- read.csv("default_data.csv", stringsAsFactors = FALSE, nrows = 1)
-  cutoff_date  <- as.Date(default_head$Date[1], "%d %m %Y")
-  cutoff_time  <- default_head$Time[1]
-  rv$latest_data <- scrape_phivolcs_data(start_date = cutoff_date, start_time = cutoff_time)
-
-  default_data <- read.csv("default_data.csv", stringsAsFactors = FALSE) |>
-    mutate(
-      Date      = as.Date(Date, "%d %m %Y"),          # unified: match startup loader
-      Year      = as.integer(format(Date, "%Y")),      # ponytail: re-derive Year from Date so it's always correct
-      Mag_scale = factor(Mag_scale, levels = sort(unique(Mag_scale)))
-    )
-
-  rv$earthquake_data <- bind_rows(default_data, rv$latest_data) |>
-    arrange(desc(Date), desc(Time)) |>
-    mutate(Year = as.integer(format(Date, "%Y")))      # re-derive again after bind in case latest rows need it
-
-  rv$use_latest <- TRUE
-
-  years <- sort(unique(rv$earthquake_data$Year[!is.na(rv$earthquake_data$Year)]))
-  updateCheckboxGroupInput(session, "year_filter",
-                           choices  = c("All", as.character(years)),
-                           selected = "All")
-
-  provinces <- sort(unique(rv$earthquake_data$Province[!is.na(rv$earthquake_data$Province)]))
-  updateSelectizeInput(session, "province_filter", choices = provinces, selected = NULL)
-
-  n_new <- if (!is.null(rv$latest_data)) nrow(rv$latest_data) else 0
-  showNotification(
-    paste("Latest data loaded successfully! Added", n_new, "new records. Years available:", paste(years, collapse = ", ")),
-    type = "message", duration = 10
-  )
-})
-  
-  prev_years <- reactiveVal("All")
-  
-  observeEvent(input$year_filter, {
-    curr <- input$year_filter
-    old <- prev_years()
-    if (is.null(curr)) curr <- character(0)
-    
-    if ("All" %in% curr && !("All" %in% old)) {
-      # Transition A: They just clicked "All". Clear all specific years.
-      updateCheckboxGroupInput(session, "year_filter", selected = "All")
-      prev_years("All")
-      
-    } else if ("All" %in% curr && length(curr) > 1) {
-      # Transition B: They just clicked a year while "All" was active. Clear "All".
-      new_sel <- setdiff(curr, "All")
-      updateCheckboxGroupInput(session, "year_filter", selected = new_sel)
-      prev_years(new_sel)
-      
-    } else if (length(curr) == 0) {
-      # Transition C: They unchecked the last specific year. Default back to "All".
-      updateCheckboxGroupInput(session, "year_filter", selected = "All")
-      prev_years("All")
-      
-    } else {
-      # Standard state change
-      prev_years(curr)
-    }
-  }, ignoreNULL = FALSE)
-
-  # Filtered data
-  filtered_data <- reactive({
-    req(rv$earthquake_data)
-    data <- rv$earthquake_data
-
-    # If input$year_filter is NULL or empty, treat it as "All"
-    yr_sel <- input$year_filter
-    if (is.null(yr_sel) || length(yr_sel) == 0) {
-      # treat as "All" -> don't filter by year
-      # (no action needed, keep 'data' as-is)
-    } else if (!("All" %in% yr_sel)) {
-      # Filter by the selected years (coerce safely to integers)
-      years_int <- suppressWarnings(as.integer(yr_sel))
-      years_int <- years_int[!is.na(years_int)]
-      if (length(years_int) > 0) {
-        data <- data |> filter(Year %in% years_int)
-      }
-    }
-    # If "All" is selected, leave 'data' unchanged
-
-    # Filter by province
-    if (!is.null(input$province_filter) && length(input$province_filter) > 0) {
-      data <- data |> filter(Province %in% input$province_filter)
-    }
-
-    # Filter by magnitude
-    data <- data |> filter(Mag >= input$mag_min & Mag <= input$mag_max)
-
-    return(data)
-  })
-
-  # Load Philippines map
-  # ph_map <- ne_countries(scale = "large", country = "Philippines", returnclass = "sf") # removed
-  # saveRDS(ph_map, "ph_map.rds")
-  ph_map <- readRDS("ph_map.rds") # replaced with saved map for quickness
-
-  # Map plot
-  output$map_plot <- renderPlot({
-    req(filtered_data())
-
-    eq_plot_data <- filtered_data() |>
-      rename(latitude = Latitude,
-             longitude = Longitude,
-             magnitude = Mag) |>
-      mutate(latitude = as.numeric(latitude),
-             longitude = as.numeric(longitude),
-             magnitude = as.numeric(magnitude)) |>
-      filter(!is.na(latitude) & !is.na(longitude) & !is.na(magnitude))
-
-    min_mag <- min(eq_plot_data$magnitude, na.rm = TRUE)
-    max_mag <- max(eq_plot_data$magnitude, na.rm = TRUE)
-    
-    # ponytail: when range is 0 or very small, avoid duplicate breaks
-    if (max_mag - min_mag < 0.01) {
-      scale_col <- scale_color_continuous(
-        low = "blue", high = "red",
-        limits = c(min_mag, max_mag),
-        name = paste0("Magnitude (", sprintf("%.1f", min_mag), "–", sprintf("%.1f", max_mag), ")")
-      )
-    } else {
-      max_label <- sprintf("%.1f (max)", max_mag)
-      scale_col <- scale_color_gradientn(
-        colors = c("blue", "green", "yellow", "orange", "red"),
-        limits = c(min_mag, max_mag),
-        breaks = c(min_mag, (min_mag + max_mag) / 2, max_mag),
-        labels = c(sprintf("%.1f", min_mag),
-                   sprintf("%.1f", (min_mag + max_mag) / 2),
-                   max_label),
-        name = paste0("Magnitude (", sprintf("%.1f", min_mag), "–", sprintf("%.1f", max_mag), ")")
-      )
-    }
-
-    ggplot() +
-      geom_sf(data = ph_map, fill = "white", color = "black", size = 0.4) +
-      geom_point(data = eq_plot_data,
-                 aes(x = longitude, y = latitude, color = magnitude, size = magnitude),
-                 alpha = 0.7) +
-      scale_col +
-      guides(size = "none") +
-      coord_sf(xlim = c(115, 132), ylim = c(0, 25)) +
-      theme_minimal() +
-      labs(
-        title = "Earthquakes in the Philippines",
-        subtitle = paste("Magnitude categories:", paste(levels(eq_plot_data$Mag_scale), collapse = ", ")),
-        caption = paste0("Earthquake magnitude thresholds: ", sprintf("%.1f", min_mag), " to ", sprintf("%.1f", max_mag)),
-        x = "Longitude (ºE)",
-        y = "Latitude (ºN)"
-      ) +
-      theme(
-        legend.position = "right",
-        plot.title = element_text(face = "bold", size = 14),
-        plot.subtitle = element_text(size = 10)
-      )
-  })
-
-  # Daily trend plot
-  output$daily_trend_plot <- renderPlot({
-    req(filtered_data())
-
-    daily_trend <- filtered_data() |>
-      # mutate(Date = as.Date(Date)) |>
-      group_by(Date) |>
-      summarise(mean_mag = mean(Mag, na.rm = TRUE),
-                max_mag = max(Mag, na.rm = TRUE),
-                min_mag = min(Mag, na.rm = TRUE))
-
-    ggplot(daily_trend, aes(x = Date)) +
-      geom_line(aes(y = mean_mag), color = "steelblue", linewidth = 0.8) +
-      geom_point(aes(y = max_mag), color = "red", alpha = 0.6, size = 1.2) +
-      geom_point(aes(y = min_mag), color = "darkgreen", alpha = 0.6, size = 1.2) +
-      geom_smooth(aes(y = mean_mag), color = "orange", se = FALSE,
-                  linewidth = 1.2, linetype = "longdash") +
-      labs(
-        title = "Daily Earthquake Magnitude Trends in the Philippines",
-        subtitle = "Blue line = average/day, orange = trend, red = highest magnitude, green = lowest magnitude per day",
-        x = "Year",
-        y = "Magnitude"
-      ) +
-      theme_minimal(base_size = 12) +
-      theme(plot.title = element_text(face = "bold", size = 14),
-            axis.text.x = element_text(angle = 0, hjust = 1))
-  })
-
-  # Monthly trend plot
-  output$monthly_trend_plot <- renderPlot({
-    req(filtered_data())
-
-    monthly_trend <- filtered_data() |>
-      mutate(#Date = as.Date(Date),
-        YearMonth = floor_date(Date, "month")) |>
-      group_by(YearMonth) |>
-      summarise(mean_mag = mean(Mag, na.rm = TRUE),
-                max_mag = max(Mag, na.rm = TRUE),
-                min_mag = min(Mag, na.rm = TRUE))
-
-    ggplot(monthly_trend, aes(x = YearMonth)) +
-      geom_line(aes(y = mean_mag), color = "steelblue", linewidth = 1) +
-      geom_point(aes(y = max_mag), color = "red", size = 2, alpha = 0.8) +
-      geom_point(aes(y = min_mag), color = "darkgreen", size = 2, alpha = 0.8) +
-      geom_smooth(aes(y = mean_mag), color = "orange", se = FALSE,
-                  linewidth = 1.2, linetype = "longdash") +
-      labs(
-        title = "Monthly Earthquake Magnitude Trends in the Philippines",
-        subtitle = "Blue line = average/month, orange = trend, red = highest magnitude, green = lowest magnitude per month",
-        x = "Year",
-        y = "Magnitude"
-      ) +
-      theme_minimal(base_size = 12) +
-      theme(plot.title = element_text(face = "bold", size = 14),
-            axis.text.x = element_text(angle = 0, hjust = 1))
-  })
-
-  # Daily depth plot
-  output$daily_depth_plot <- renderPlot({
-    req(filtered_data())
-
-    daily_depth <- filtered_data() |>
-      # mutate(Date = as.Date(Date)) |>
-      rename(depth_km = "Depth_km") |>
-      group_by(Date) |>
-      summarise(avg_depth = mean(depth_km, na.rm = TRUE),
-                min_depth = min(depth_km, na.rm = TRUE),
-                max_depth = max(depth_km, na.rm = TRUE),
-                avg_mag = mean(Mag, na.rm = TRUE),
-                n_quakes = n())
-
-    ggplot(daily_depth, aes(x = Date)) +
-      geom_point(aes(y = avg_depth, color = avg_mag), size = 2, alpha = 0.7) +
-      geom_point(aes(y = min_depth), shape = 25, fill = "blue", color = "blue", size = 1.5) +
-      geom_point(aes(y = max_depth), shape = 24, fill = "red", color = "red", size = 1.5) +
-      scale_y_reverse() +
-      scale_color_gradient(low = "yellow", high = "red", name = "Avg Magnitude") +
-      labs(
-        title = "Daily Earthquake Depths in the Philippines",
-        subtitle = "Lower points indicate deeper depth of the earthquake's focus (hypocenter)",
-        x = "Date",
-        y = "Depth (km, inverted) [x-axis = 0 is to mimick Earth's surface]"
-      ) +
-      theme_minimal(base_size = 12) +
-      theme(plot.title = element_text(face = "bold", size = 14),
-            axis.text.x = element_text(angle = 0, hjust = 1))
-  })
-
-  # Monthly depth plot
-  output$monthly_depth_plot <- renderPlot({
-    req(filtered_data())
-
-    monthly_depth <- filtered_data() |>
-      # mutate(Date = as.Date(Date)) |>
-      rename(depth_km = "Depth_km") |>
-      mutate(YearMonth = floor_date(Date, "month")) |>
-      group_by(YearMonth) |>
-      summarise(avg_depth = mean(depth_km, na.rm = TRUE),
-                min_depth = min(depth_km, na.rm = TRUE),
-                max_depth = max(depth_km, na.rm = TRUE),
-                avg_mag = mean(Mag, na.rm = TRUE),
-                n_quakes = n())
-
-    ggplot(monthly_depth, aes(x = YearMonth)) +
-      geom_point(aes(y = avg_depth, color = avg_mag), size = 3, alpha = 0.8) +
-      geom_point(aes(y = min_depth), shape = 25, fill = "blue", color = "blue", size = 2) +
-      geom_point(aes(y = max_depth), shape = 24, fill = "red", color = "red", size = 2) +
-      scale_y_reverse() +
-      scale_color_gradient(low = "yellow", high = "red", name = "Avg Magnitude") +
-      labs(
-        title = "Monthly Earthquake Depths in the Philippines",
-        subtitle = "Lower points indicate deeper depth of the earthquake's focus (hypocenter)",
-        x = "Month",
-        y = "Depth (km, inverted) [x-axis = 0 is to mimick Earth's surface]"
-      ) +
-      theme_minimal(base_size = 12) +
-      theme(plot.title = element_text(face = "bold", size = 14),
-            axis.text.x = element_text(angle = 0, hjust = 1))
-  })
-
-  # Frequency by province plot
-  output$freq_province_plot <- renderPlot({
-    req(filtered_data())
-
-    daily_counts <- filtered_data() |>
-      filter(!is.na(Province)) |>
-      # mutate(Date = as.Date(Date)) |>
-      group_by(Province, Date) |>
-      summarise(Daily_Count = n(), .groups = "drop")
-
-    province_order <- daily_counts |>
-      group_by(Province) |>
-      summarise(Total = sum(Daily_Count, na.rm = TRUE)) |>
-      arrange(desc(Total)) |>
-      pull(Province)
-
-    ggplot(daily_counts, aes(x = Daily_Count, y = factor(Province, levels = rev(province_order)))) +
-      geom_col(fill = "steelblue") +
-      labs(
-        title = "Earthquake Frequency by Province",
-        # subtitle = "January 2017 to October 11, 2025, 5:00 PM",
-        x = "Earthquake Frequency",
-        y = "Province"
-      ) +
-      theme_minimal(base_size = 12) +
-      theme(plot.title = element_text(face = "bold", size = 14),
-            panel.grid.major.y = element_blank(),
-            panel.grid.minor.y = element_blank())
-  })
-
-  # Data table
-  output$data_table <- renderDT({
-    req(filtered_data())
-
-    # Format the data for display
-    display_data <- filtered_data() |>
-      mutate(Date = format(Date, "%d/%m/%y"))  # Format date properly
-
-    datatable(display_data,
-              options = list(pageLength = 25, scrollX = TRUE),
-              filter = "top")
-  })
-
-  # Download handlers for data
-  output$download_default <- downloadHandler(
-    filename = function() {
-      paste0("default_data_", Sys.Date(), ".csv")
-    },
-    content = function(file) {
-      write.csv(read.csv("default_data.csv"), file, row.names = FALSE)
-    }
-  )
-
-  output$download_latest <- downloadHandler(
-    filename = function() {
-      paste0("combined_data_", Sys.Date(), ".csv")
-    },
-    content = function(file) {
-      req(rv$latest_data)
-
-      # Load default data
-      default_data <- read.csv("default_data.csv", stringsAsFactors = FALSE) |>
-        mutate(
-          Date = as.Date(Date, "%d %m %Y"),
-          Mag_scale = factor(Mag_scale, levels = sort(unique(Mag_scale)))
-        )
-
-      # Combine default data with latest data
-      combined_data <- bind_rows(default_data, rv$latest_data) |>
-        arrange(desc(Date), desc(Time))
-
-      write.csv(combined_data, file, row.names = FALSE)
-    }
-  )
-
-  # Download handlers for plots
-  output$download_map <- downloadHandler(
-    filename = function() {
-      paste0("earthquake_map_", Sys.Date(), ".png")
-    },
-    content = function(file) {
-      eq_plot_data <- filtered_data() |>
-        rename(latitude = Latitude,
-               longitude = Longitude,
-               magnitude = Mag) |>
-        mutate(latitude = as.numeric(latitude),
-               longitude = as.numeric(longitude),
-               magnitude = as.numeric(magnitude)) |>
-        filter(!is.na(latitude) & !is.na(longitude) & !is.na(magnitude))
-
-      min_mag <- min(eq_plot_data$magnitude, na.rm = TRUE)
-      max_mag <- max(eq_plot_data$magnitude, na.rm = TRUE)
-      max_label <- sprintf("%.1f (max)", max_mag)
-
-      p <- ggplot() +
-        geom_sf(data = ph_map, fill = "white", color = "black", size = 0.4) +
-        geom_point(data = eq_plot_data,
-                   aes(x = longitude, y = latitude, color = magnitude, size = magnitude),
-                   alpha = 0.7) +
-        scale_color_gradientn(
-          colors = c("blue", "green", "yellow", "orange", "red"),
-          limits = c(min_mag, max_mag),
-          breaks = c(min_mag, (min_mag + max_mag) / 2, max_mag),
-          labels = c(sprintf("%.1f", min_mag),
-                     sprintf("%.1f", (min_mag + max_mag) / 2),
-                     max_label),
-          name = paste0("Magnitude (", sprintf("%.1f", min_mag), "–", sprintf("%.1f", max_mag), ")")
-        ) +
-        guides(size = "none") +
-        coord_sf(xlim = c(115, 132), ylim = c(0, 25)) +
-        theme_minimal() +
-        labs(
-          title = "Earthquakes in the Philippines",
-          subtitle = paste("Magnitude categories:", paste(levels(eq_plot_data$Mag_scale), collapse = ", ")),
-          caption = paste0("Earthquake magnitude thresholds: ", sprintf("%.1f", min_mag), " to ", sprintf("%.1f", max_mag)),
-          x = "Longitude (ºE)",
-          y = "Latitude (ºN)"
-        ) +
-        theme(
-          legend.position = "right",
-          plot.title = element_text(face = "bold", size = 14),
-          plot.subtitle = element_text(size = 10)
-        )
-
-      ggsave(file, plot = p, width = input$plot_width, height = input$plot_height, dpi = input$plot_dpi, bg = "white")
-    }
-  )
-
-  output$download_daily_trend <- downloadHandler(
-    filename = function() {
-      paste0("daily_magnitude_trend_", Sys.Date(), ".png")
-    },
-    content = function(file) {
-      daily_trend <- filtered_data() |>
-        # mutate(Date = as.Date(Date)) |>
-        group_by(Date) |>
-        summarise(mean_mag = mean(Mag, na.rm = TRUE),
-                  max_mag = max(Mag, na.rm = TRUE),
-                  min_mag = min(Mag, na.rm = TRUE))
-
-      p <- ggplot(daily_trend, aes(x = Date)) +
-        geom_line(aes(y = mean_mag), color = "steelblue", linewidth = 0.8) +
-        geom_point(aes(y = max_mag), color = "red", alpha = 0.6, size = 1.2) +
-        geom_point(aes(y = min_mag), color = "darkgreen", alpha = 0.6, size = 1.2) +
-        geom_smooth(aes(y = mean_mag), color = "orange", se = FALSE,
-                    linewidth = 1.2, linetype = "longdash") +
-        labs(
-          title = "Daily Earthquake Magnitude Trends in the Philippines",
-          subtitle = "Blue line = average/day, orange = trend, red = highest magnitude, green = lowest magnitude per day",
-          x = "Year",
-          y = "Magnitude"
-        ) +
-        theme_minimal(base_size = 12) +
-        theme(plot.title = element_text(face = "bold", size = 14),
-              axis.text.x = element_text(angle = 0, hjust = 1))
-
-      ggsave(file, plot = p, width = input$plot_width, height = input$plot_height, dpi = input$plot_dpi, bg = "white")
-    }
-  )
-
-  output$download_monthly_trend <- downloadHandler(
-    filename = function() {
-      paste0("monthly_magnitude_trend_", Sys.Date(), ".png")
-    },
-    content = function(file) {
-      monthly_trend <- filtered_data() |>
-        mutate(#Date = as.Date(Date),
-          YearMonth = floor_date(Date, "month")) |>
-        group_by(YearMonth) |>
-        summarise(mean_mag = mean(Mag, na.rm = TRUE),
-                  max_mag = max(Mag, na.rm = TRUE),
-                  min_mag = min(Mag, na.rm = TRUE))
-
-      p <- ggplot(monthly_trend, aes(x = YearMonth)) +
-        geom_line(aes(y = mean_mag), color = "steelblue", linewidth = 1) +
-        geom_point(aes(y = max_mag), color = "red", size = 2, alpha = 0.8) +
-        geom_point(aes(y = min_mag), color = "darkgreen", size = 2, alpha = 0.8) +
-        geom_smooth(aes(y = mean_mag), color = "orange", se = FALSE,
-                    linewidth = 1.2, linetype = "longdash") +
-        labs(
-          title = "Monthly Earthquake Magnitude Trends in the Philippines",
-          subtitle = "Blue line = average/month, orange = trend, red = highest magnitude, green = lowest magnitude per month",
-          x = "Year",
-          y = "Magnitude"
-        ) +
-        theme_minimal(base_size = 12) +
-        theme(plot.title = element_text(face = "bold", size = 14),
-              axis.text.x = element_text(angle = 0, hjust = 1))
-
-      ggsave(file, plot = p, width = input$plot_width, height = input$plot_height, dpi = input$plot_dpi, bg = "white")
-    }
-  )
-
-  output$download_daily_depth <- downloadHandler(
-    filename = function() {
-      paste0("daily_depth_", Sys.Date(), ".png")
-    },
-    content = function(file) {
-      daily_depth <- filtered_data() |>
-        rename(depth_km = "Depth_km") |>
-        group_by(Date) |>
-        summarise(avg_depth = mean(depth_km, na.rm = TRUE),
-                  min_depth = min(depth_km, na.rm = TRUE),
-                  max_depth = max(depth_km, na.rm = TRUE),
-                  avg_mag = mean(Mag, na.rm = TRUE),
-                  n_quakes = n())
-
-      p <- ggplot(daily_depth, aes(x = Date)) +
-        geom_point(aes(y = avg_depth, color = avg_mag), size = 2, alpha = 0.7) +
-        geom_point(aes(y = min_depth), shape = 25, fill = "blue", color = "blue", size = 1.5) +
-        geom_point(aes(y = max_depth), shape = 24, fill = "red", color = "red", size = 1.5) +
-        scale_y_reverse() +
-        scale_color_gradient(low = "yellow", high = "red", name = "Avg Magnitude") +
-        labs(
-          title = "Daily Earthquake Depths in the Philippines",
-          subtitle = "Lower points indicate deeper depth of the earthquake's focus (hypocenter)",
-          x = "Date",
-          y = "Depth (km, inverted) [x-axis = 0 is to mimick Earth's surface]"
-        ) +
-        theme_minimal(base_size = 12) +
-        theme(plot.title = element_text(face = "bold", size = 14),
-              axis.text.x = element_text(angle = 0, hjust = 1))
-
-      ggsave(file, plot = p, width = input$plot_width, height = input$plot_height, dpi = input$plot_dpi, bg = "white")
-    }
-  )
-
-  output$download_monthly_depth <- downloadHandler(
-    filename = function() {
-      paste0("monthly_depth_", Sys.Date(), ".png")
-    },
-    content = function(file) {
-      monthly_depth <- filtered_data() |>
-        rename(depth_km = "Depth_km") |>
-        mutate(YearMonth = floor_date(Date, "month")) |>
-        group_by(YearMonth) |>
-        summarise(avg_depth = mean(depth_km, na.rm = TRUE),
-                  min_depth = min(depth_km, na.rm = TRUE),
-                  max_depth = max(depth_km, na.rm = TRUE),
-                  avg_mag = mean(Mag, na.rm = TRUE),
-                  n_quakes = n())
-
-      p <- ggplot(monthly_depth, aes(x = YearMonth)) +
-        geom_point(aes(y = avg_depth, color = avg_mag), size = 3, alpha = 0.8) +
-        geom_point(aes(y = min_depth), shape = 25, fill = "blue", color = "blue", size = 2) +
-        geom_point(aes(y = max_depth), shape = 24, fill = "red", color = "red", size = 2) +
-        scale_y_reverse() +
-        scale_color_gradient(low = "yellow", high = "red", name = "Avg Magnitude") +
-        labs(
-          title = "Monthly Earthquake Depths in the Philippines",
-          subtitle = "Lower points indicate deeper depth of the earthquake's focus (hypocenter)",
-          x = "Month",
-          y = "Depth (km, inverted) [x-axis = 0 is to mimick Earth's surface]"
-        ) +
-        theme_minimal(base_size = 12) +
-        theme(plot.title = element_text(face = "bold", size = 14),
-              axis.text.x = element_text(angle = 0, hjust = 1))
-
-      ggsave(file, plot = p, width = input$plot_width, height = input$plot_height, dpi = input$plot_dpi, bg = "white")
-    }
-  )
-
-  output$download_freq_province <- downloadHandler(
-    filename = function() {
-      paste0("frequency_by_province_", Sys.Date(), ".png")
-    },
-    content = function(file) {
-      daily_counts <- filtered_data() |>
-        filter(!is.na(Province)) |>
-        # mutate(Date = as.Date(Date)) |>
-        group_by(Province, Date) |>
-        summarise(Daily_Count = n(), .groups = "drop")
-
-      province_order <- daily_counts |>
-        group_by(Province) |>
-        summarise(Total = sum(Daily_Count, na.rm = TRUE)) |>
-        arrange(desc(Total)) |>
-        pull(Province)
-
-      p <- ggplot(daily_counts, aes(x = Daily_Count, y = factor(Province, levels = rev(province_order)))) +
-        geom_col(fill = "steelblue") +
-        labs(
-          title = "Earthquake Frequency by Province",
-          # subtitle = "January 2017 to October 11, 2025, 5:00 PM",
-          x = "Earthquake Frequency",
-          y = "Province"
-        ) +
-        theme_minimal(base_size = 12) +
-        theme(plot.title = element_text(face = "bold", size = 14),
-              panel.grid.major.y = element_blank(),
-              panel.grid.minor.y = element_blank())
-
-      ggsave(file, plot = p, width = input$plot_width, height = input$plot_height, dpi = input$plot_dpi, bg = "white")
-    }
+    controls,
+    plotOutput(output_id, height = height, click = click),
+    if (!is.null(footer)) card_footer(footer)
   )
 }
 
-# Run the application
-shinyApp(ui = ui, server = server)
+help_text <- function(...) p(class = "text-muted small mb-2", ...)
 
-# # Run these when deploying, in case rsconnect::deployApp() does not work
-# renv::remove("rnaturalearth")
-# renv::remove("rnaturalearthdata")
-# renv::snapshot()
-# # 1. Restore the project environment to only what you actually use
-# renv::restore()
-# # 2. Then take a fresh snapshot with ONLY currently used packages
-# renv::snapshot()
-# rsconnect::deployApp(
-#   appFiles = c("app.R", "default_data.csv", "ph_map.rds", "renv.lock")
-# )
+# -----------------------------------------------------------------------------
+# User interface
+# -----------------------------------------------------------------------------
+ui <- page_navbar(
+  title = "Philippine Earthquake Explorer",
+  id = "nav",
+  window_title = "Philippine Earthquake Explorer",
+  theme = bs_theme(version = 5, primary = "#2a78d6", "navbar-bg" = "#0d366b"),
+  fillable = FALSE,
+  header = tags$head(tags$style(HTML("
+    .value-box-title { font-size: .85rem; }
+    .bslib-value-box .value-box-value { font-size: 1.6rem; }
+    .about h3 { margin-top: 1.5rem; }
+    .about li { margin-bottom: .25rem; }
+    .about table { font-size: .9rem; }
+  "))),
+
+  sidebar = sidebar(
+    width = 320,
+    title = "Filters",
+    help_text("Filters apply to every tab. Charts, tables and downloads update automatically."),
+
+    dateRangeInput("date_range", "Date range (Philippine Time)",
+                   start = min(DEFAULT_DATA$Date), end = max(DEFAULT_DATA$Date),
+                   min = min(DEFAULT_DATA$Date), max = max(DEFAULT_DATA$Date),
+                   format = "d M yyyy", separator = "to"),
+    selectInput("quick_period", NULL,
+                choices = c("Quick select a period..." = "",
+                            "Last 30 days of data" = "30d",
+                            "Last 12 months of data" = "12m",
+                            setNames(rev(as.character(sort(unique(DEFAULT_DATA$Year)))),
+                                     paste("Year", rev(sort(unique(DEFAULT_DATA$Year))))),
+                            "All years" = "all")),
+
+    sliderInput("mag_range", "Magnitude", min = 1, max = MAG_MAX,
+                value = c(DEFAULT_MIN_MAG, MAG_MAX), step = 0.1),
+
+    checkboxGroupInput("island_group", "Island group",
+                       choices = names(PROVINCES_BY_ISLAND_GROUP),
+                       selected = names(PROVINCES_BY_ISLAND_GROUP), inline = TRUE),
+
+    selectizeInput("province_filter", "Province(s)", choices = NULL, multiple = TRUE,
+                   options = list(placeholder = "All provinces (type to search)",
+                                  plugins = list("remove_button"))),
+
+    actionButton("reset_filters", "Reset all filters", icon = icon("rotate-left"),
+                 class = "btn-outline-secondary btn-sm"),
+
+    hr(),
+    h6("Data"),
+    uiOutput("data_status"),
+    actionButton("update_data", "Add latest events from PHIVOLCS",
+                 icon = icon("cloud-arrow-down"), class = "btn-primary btn-sm"),
+    help_text("The data is updated automatically after each month ends. This button",
+              "adds the events published since then (usually under 10 seconds).",
+              "Only your session is updated."),
+
+    accordion(
+      open = FALSE,
+      accordion_panel(
+        "Chart download size", icon = icon("image"),
+        numericInput("plot_width", "Width (inches)", value = 11, min = 3, max = 30, step = 0.5),
+        numericInput("plot_height", "Height (inches)", value = 7, min = 3, max = 30, step = 0.5),
+        numericInput("plot_dpi", "Resolution (dots per inch)", value = 300, min = 72, max = 600, step = 50)
+      )
+    )
+  ),
+
+  # --- Overview -----------------------------------------------------------------
+  nav_panel(
+    "Overview", icon = icon("chart-simple"),
+    help_text(
+      "A summary of the earthquakes that match the filters on the left. All magnitudes,",
+      "depths and locations are as published by PHIVOLCS. See", strong("About & methods"),
+      "for definitions, data cleaning and limitations."
+    ),
+    uiOutput("value_boxes"),
+    plot_card("Magnitude distribution", "mag_dist_plot", "dl_mag_dist", height = "460px"),
+    plot_card("Depth distribution", "depth_dist_plot", "dl_depth_dist", height = "520px"),
+    card(
+      card_header("Summary by year"),
+      help_text("The current year may be incomplete. Median depth excludes events with no reported depth."),
+      DTOutput("year_table", fill = FALSE)
+    )
+  ),
+
+  # --- Map ----------------------------------------------------------------------
+  nav_panel(
+    "Map", icon = icon("map-location-dot"),
+    layout_columns(
+      col_widths = c(8, 4),
+      plot_card(
+        "Epicentre map", "map_plot", "dl_map", height = "780px",
+        click = "map_click",
+        controls = card_body(
+          class = "py-2",
+          radioButtons("map_color", "Colour circles by", inline = TRUE,
+                       choices = c("Magnitude" = "magnitude", "Depth" = "depth"))
+        )
+      ),
+      card(
+        card_header("Event details"),
+        help_text("Click a circle on the map to see the event(s) at that spot."),
+        uiOutput("map_click_info")
+      )
+    )
+  ),
+
+  # --- Trends -------------------------------------------------------------------
+  nav_panel(
+    "Trends", icon = icon("chart-line"),
+    plot_card(
+      "Change over time", "trend_plot", "dl_trend", height = "620px",
+      controls = card_body(
+        class = "py-2",
+        layout_columns(
+          col_widths = c(4, 4, 4),
+          radioButtons("trend_var", "Show",
+                       choices = c("Number of events" = "count",
+                                   "Magnitude" = "Mag",
+                                   "Depth" = "Depth_km")),
+          radioButtons("trend_unit", "Group by", choices = TIME_UNITS, selected = "month"),
+          conditionalPanel(
+            "input.trend_var == 'count'",
+            checkboxInput("trend_separate", "One panel per magnitude group (each with its own scale)",
+                          value = TRUE)
+          )
+        )
+      )
+    )
+  ),
+
+  # --- Provinces ----------------------------------------------------------------
+  nav_panel(
+    "Provinces", icon = icon("location-dot"),
+    plot_card(
+      "Earthquakes by province", "province_plot", "dl_province", height = "640px",
+      controls = card_body(
+        class = "py-2",
+        sliderInput("top_n", "Number of provinces to show", min = 5, max = 85, value = 20,
+                    step = 1, width = "320px")
+      )
+    ),
+    card(
+      card_header("Summary by province"),
+      help_text(
+        "Province is the province of the reference town PHIVOLCS names in the event's",
+        "location (for example, \"13 km N 37° E of Bayabas (Surigao del Sur)\").",
+        "Offshore events count toward the province of the nearest reference town.",
+        "\"Share of events\" is the share of all events in the current selection."
+      ),
+      DTOutput("province_table", fill = FALSE)
+    )
+  ),
+
+  # --- Data ---------------------------------------------------------------------
+  nav_panel(
+    "Data", icon = icon("table"),
+    card(
+      card_header(
+        class = "d-flex justify-content-between align-items-center flex-wrap gap-2",
+        "Earthquake records",
+        div(
+          downloadButton("dl_filtered", "Filtered data (CSV)", class = "btn-sm btn-primary"),
+          downloadButton("dl_all", "All data (CSV)", class = "btn-sm btn-outline-secondary")
+        )
+      ),
+      help_text(
+        "One row per earthquake, newest first. Use the search box or the boxes above",
+        "each column to search within the current selection. \"Filtered data\" downloads",
+        "exactly the rows that match the sidebar filters. \"All data\" downloads the full,",
+        "cleaned data set, including any events you added from PHIVOLCS. Column",
+        "definitions are in About & methods."
+      ),
+      DTOutput("data_table", fill = FALSE)
+    )
+  ),
+
+  # --- About --------------------------------------------------------------------
+  nav_panel(
+    "About & methods", icon = icon("circle-info"),
+    div(class = "about container-fluid", style = "max-width: 960px;", uiOutput("about"))
+  ),
+
+  nav_spacer(),
+  nav_item(tags$a(icon("github"), "Source code", href = REPO_URL, target = "_blank"))
+)
+
+# -----------------------------------------------------------------------------
+# Server
+# -----------------------------------------------------------------------------
+server <- function(input, output, session) {
+
+  # ---- Data state (per session) ------------------------------------------------
+  rv <- reactiveValues(
+    std = DEFAULT_STD,        # standardised (uncleaned) records
+    data = DEFAULT_DATA,      # cleaned records used everywhere
+    n_added = 0,
+    scrape_pages = NULL
+  )
+
+  # Fill the province list from the data.
+  observe({
+    provinces <- sort(unique(na.omit(rv$data$Province)))
+    updateSelectizeInput(session, "province_filter", choices = provinces,
+                         selected = intersect(isolate(input$province_filter), provinces),
+                         server = FALSE)
+  })
+
+  # ---- Filters -----------------------------------------------------------------
+  data_dates <- reactive(range(rv$data$Date))
+
+  observeEvent(input$quick_period, {
+    req(nzchar(input$quick_period))
+    last <- data_dates()[2]
+    range <- switch(
+      input$quick_period,
+      "30d" = c(last - 29, last),
+      "12m" = c(last %m-% months(12) + 1, last),
+      "all" = data_dates(),
+      {
+        yr <- as.integer(input$quick_period)
+        c(max(as.Date(sprintf("%d-01-01", yr)), data_dates()[1]),
+          min(as.Date(sprintf("%d-12-31", yr)), last))
+      }
+    )
+    updateDateRangeInput(session, "date_range", start = range[1], end = range[2])
+    updateSelectInput(session, "quick_period", selected = "")
+  })
+
+  observeEvent(input$reset_filters, {
+    updateDateRangeInput(session, "date_range", start = data_dates()[1], end = data_dates()[2])
+    updateSliderInput(session, "mag_range", value = c(DEFAULT_MIN_MAG, MAG_MAX))
+    updateCheckboxGroupInput(session, "island_group", selected = names(PROVINCES_BY_ISLAND_GROUP))
+    updateSelectizeInput(session, "province_filter", selected = character(0))
+  })
+
+  filtered <- reactive({
+    dr <- input$date_range
+    validate(
+      need(length(dr) == 2 && !anyNA(dr), "Please choose a start and an end date."),
+      need(dr[1] <= dr[2], "The start date must be on or before the end date."),
+      need(length(input$island_group) > 0, "Select at least one island group.")
+    )
+    d <- rv$data |>
+      filter(Date >= dr[1], Date <= dr[2],
+             Mag >= input$mag_range[1] - 1e-9, Mag <= input$mag_range[2] + 1e-9)
+    # Only filter by island group if not all are ticked, so events whose
+    # province could not be identified are kept by default.
+    if (length(input$island_group) < length(PROVINCES_BY_ISLAND_GROUP)) {
+      d <- d |> filter(Island_group %in% input$island_group)
+    }
+    if (length(input$province_filter) > 0) {
+      d <- d |> filter(Province %in% input$province_filter)
+    }
+    d
+  })
+
+  # A key that changes whenever the filtered data changes (used for caching).
+  filter_key <- reactive(list(input$date_range, input$mag_range, input$island_group,
+                              input$province_filter, rv$n_added))
+
+  # ---- Data status and live update ---------------------------------------------
+  output$data_status <- renderUI({
+    d <- rv$data
+    p(class = "small mb-2",
+      sprintf("%s events, %s to %s.", fmt_n(nrow(d)),
+              format(min(d$Date), "%d %b %Y"), format(max(d$Date), "%d %b %Y")),
+      if (rv$n_added > 0) tags$span(class = "text-success",
+                                    sprintf("Includes %s events added from PHIVOLCS.", fmt_n(rv$n_added))))
+  })
+
+  observeEvent(input$update_data, {
+    updateActionButton(session, "update_data", disabled = TRUE)
+    on.exit(updateActionButton(session, "update_data", disabled = FALSE))
+
+    since <- max(rv$data$DateTime, na.rm = TRUE)
+    result <- tryCatch(
+      withProgress(message = "Downloading from PHIVOLCS", value = 0, {
+        scrape_phivolcs(since, progress = function(value, detail) setProgress(value, detail = detail))
+      }),
+      error = function(e) {
+        showNotification(paste("Could not reach PHIVOLCS:", conditionMessage(e)),
+                         type = "error", duration = 15)
+        NULL
+      }
+    )
+    req(result)
+    rv$scrape_pages <- result$pages
+
+    if (is.null(result$data)) {
+      showNotification(
+        "No new events found. Either the data is already up to date or the PHIVOLCS website could not be read. Please try again later.",
+        type = "warning", duration = 12)
+      return()
+    }
+
+    old_n <- nrow(rv$data)
+    new_std <- bind_rows(rv$std, result$data)
+    new_data <- clean_eq_data(new_std)
+    rv$std <- new_std
+    rv$data <- new_data
+    added <- nrow(new_data) - old_n
+    rv$n_added <- rv$n_added + added
+
+    # Extend the date filter to include the new events.
+    new_range <- range(new_data$Date)
+    updateDateRangeInput(session, "date_range", max = new_range[2], end = new_range[2],
+                         start = input$date_range[1])
+    showNotification(
+      sprintf("Added %s new events, up to %s.", fmt_n(added), format(new_range[2], "%d %b %Y")),
+      type = "message", duration = 10)
+  })
+
+  # ---- Overview ----------------------------------------------------------------
+  output$value_boxes <- renderUI({
+    d <- filtered()
+    if (nrow(d) == 0) {
+      return(div(class = "alert alert-warning", "No earthquakes match the current filters."))
+    }
+    big <- d[which.max(d$Mag), ]
+    big_where <- paste0(
+      if (!is.na(big$City_Municipality)) big$City_Municipality else "",
+      if (!is.na(big$Province)) paste0(", ", big$Province) else ""
+    )
+    layout_columns(
+      fill = FALSE,
+      col_widths = c(3, 3, 3, 3),
+      value_box(
+        title = "Earthquakes recorded", value = fmt_n(nrow(d)),
+        showcase = icon("wave-square"), theme = "primary",
+        p(sprintf("%s to %s", format(min(d$Date), "%d %b %Y"), format(max(d$Date), "%d %b %Y")))
+      ),
+      value_box(
+        title = "Largest magnitude", value = sprintf("M %.1f", big$Mag),
+        showcase = icon("arrow-up-wide-short"), theme = "light",
+        p(format(big$Date, "%d %b %Y"), if (nzchar(big_where)) paste0("near ", big_where))
+      ),
+      value_box(
+        title = "Magnitude 5.0 or higher", value = fmt_n(sum(d$Mag >= 5)),
+        showcase = icon("triangle-exclamation"), theme = "light",
+        p(sprintf("%s of magnitude 6.0 or higher", fmt_n(sum(d$Mag >= 6))))
+      ),
+      value_box(
+        title = "Median depth", value = sprintf("%.0f km", median(d$Depth_km, na.rm = TRUE)),
+        showcase = icon("arrow-down"), theme = "light",
+        p(sprintf("%.0f%% shallow (less than 70 km deep)",
+                  100 * mean(d$Depth_km < 70, na.rm = TRUE)))
+      )
+    )
+  })
+
+  mag_dist <- reactive(plot_mag_distribution(filtered()))
+  depth_dist <- reactive(plot_depth_distribution(filtered()))
+  output$mag_dist_plot <- renderPlot(mag_dist(), res = 96) |> bindCache(filter_key())
+  output$depth_dist_plot <- renderPlot(depth_dist(), res = 96) |> bindCache(filter_key())
+
+  output$year_table <- renderDT({
+    tbl <- summarise_by_year(filtered())
+    if ("Message" %in% names(tbl)) return(datatable(tbl, rownames = FALSE, options = list(dom = "t")))
+    datatable(
+      tbl,
+      rownames = FALSE,
+      options = list(dom = "t", paging = FALSE, ordering = TRUE),
+      caption = "Counts by magnitude threshold are cumulative (an M 6.2 event is counted in all three columns)."
+    ) |>
+      formatRound(c("Events", "M ≥ 4.0", "M ≥ 5.0", "M ≥ 6.0"), digits = 0) |>
+      formatRound("Largest magnitude", 1) |>
+      formatRound("Median depth (km)", 0)
+  })
+
+  # ---- Map ---------------------------------------------------------------------
+  map_plot <- reactive(plot_map(filtered(), PH_OUTLINE, input$map_color))
+  output$map_plot <- renderPlot(map_plot(), res = 96) |>
+    bindCache(filter_key(), input$map_color)
+
+  output$map_click_info <- renderUI({
+    click <- input$map_click
+    if (is.null(click)) return(NULL)
+    pts <- map_points(filtered())
+    near <- nearPoints(pts, click, xvar = "Longitude", yvar = "Latitude",
+                       threshold = 8, maxpoints = 10)
+    if (nrow(near) == 0) return(help_text("No event at that spot. Try clicking closer to a circle's centre."))
+    near <- near |> arrange(desc(Mag))
+    tagList(lapply(seq_len(nrow(near)), function(i) {
+      e <- near[i, ]
+      div(class = "border-bottom pb-2 mb-2",
+          strong(sprintf("M %.1f", e$Mag)), " · ",
+          format(e$Date, "%d %b %Y"), if (!is.na(e$Time)) paste(e$Time, "PhST"), br(),
+          sprintf("%s km %s of %s%s", fmt_n(e$Distance_to_Reference_km),
+                  coalesce(e$Direction_to_Reference, ""), coalesce(e$City_Municipality, "?"),
+                  if (!is.na(e$Province)) paste0(" (", e$Province, ")") else ""), br(),
+          span(class = "text-muted small",
+               sprintf("Depth: %s · %.2f°N, %.2f°E · %s",
+                       if (is.na(e$Depth_km)) "not reported" else paste(e$Depth_km, "km"),
+                       e$Latitude, e$Longitude, as.character(e$Mag_class))))
+    }))
+  })
+
+  # ---- Trends ------------------------------------------------------------------
+  trend_plot <- reactive({
+    if (input$trend_var == "count") {
+      plot_counts_over_time(filtered(), input$trend_unit, separate = isTRUE(input$trend_separate))
+    } else {
+      plot_metric_trend(filtered(), input$trend_unit, input$trend_var)
+    }
+  })
+  output$trend_plot <- renderPlot(trend_plot(), res = 96) |>
+    bindCache(filter_key(), input$trend_var, input$trend_unit, input$trend_separate)
+
+  # ---- Provinces ---------------------------------------------------------------
+  province_plot <- reactive(plot_provinces(filtered(), input$top_n))
+  output$province_plot <- renderPlot(province_plot(), res = 96) |>
+    bindCache(filter_key(), input$top_n)
+
+  output$province_table <- renderDT({
+    tbl <- summarise_by_province(filtered())
+    if ("Message" %in% names(tbl)) return(datatable(tbl, rownames = FALSE, options = list(dom = "t")))
+    datatable(tbl, rownames = FALSE, filter = "top",
+              options = list(pageLength = 15, scrollX = TRUE)) |>
+      formatRound("Events", 0) |>
+      formatPercentage("Share of events", 1) |>
+      formatRound("Largest magnitude", 1) |>
+      formatRound("Median depth (km)", 0)
+  })
+
+  # ---- Data table --------------------------------------------------------------
+  output$data_table <- renderDT({
+    d <- filtered() |>
+      transmute(
+        Date = Date,
+        `Time (PhST)` = Time,
+        Magnitude = Mag,
+        `Magnitude class` = Mag_class,
+        `Depth (km)` = Depth_km,
+        `Depth class` = Depth_class,
+        `Latitude (°N)` = Latitude,
+        `Longitude (°E)` = Longitude,
+        `Reference location` = sprintf("%s km %s of %s", Distance_to_Reference_km,
+                                       coalesce(Direction_to_Reference, "?"),
+                                       coalesce(City_Municipality, "?")),
+        Province = Province,
+        `Island group` = Island_group,
+        `Coordinates valid` = ifelse(Coord_valid, "Yes", "No"),
+        Source = Source
+      )
+    datatable(d, rownames = FALSE, filter = "top",
+              options = list(pageLength = 25, scrollX = TRUE, order = list())) |>
+      formatRound("Magnitude", 1)
+  }, server = TRUE)
+
+  # ---- Downloads ---------------------------------------------------------------
+  stamp <- function() format(Sys.time(), "%Y%m%d-%H%M", tz = PH_TZ)
+
+  output$dl_filtered <- downloadHandler(
+    filename = function() paste0("ph-earthquakes-filtered-", stamp(), ".csv"),
+    content = function(file) write_utf8_csv(export_eq_data(filtered()), file)
+  )
+  output$dl_all <- downloadHandler(
+    filename = function() paste0("ph-earthquakes-all-", stamp(), ".csv"),
+    content = function(file) write_utf8_csv(export_eq_data(rv$data), file)
+  )
+
+  save_plot <- function(plot, file) {
+    clamp <- function(x, lo, hi, default) if (is.numeric(x) && !is.na(x)) min(max(x, lo), hi) else default
+    ggsave(file, plot = plot, device = "png", bg = "white", units = "in",
+           width = clamp(input$plot_width, 3, 30, 11),
+           height = clamp(input$plot_height, 3, 30, 7),
+           dpi = clamp(input$plot_dpi, 72, 600, 300))
+  }
+  plot_download <- function(name, plot_reactive) {
+    downloadHandler(
+      filename = function() paste0("ph-earthquakes-", name, "-", stamp(), ".png"),
+      content = function(file) save_plot(plot_reactive(), file)
+    )
+  }
+  output$dl_map <- plot_download("map", map_plot)
+  output$dl_trend <- plot_download("trend", trend_plot)
+  output$dl_province <- plot_download("provinces", province_plot)
+  output$dl_mag_dist <- plot_download("magnitude-distribution", mag_dist)
+  output$dl_depth_dist <- plot_download("depth-distribution", depth_dist)
+
+  # ---- About -------------------------------------------------------------------
+  output$about <- renderUI(about_page(
+    cleaning_log = attr(rv$data, "cleaning_log"),
+    scrape_pages = rv$scrape_pages,
+    data_range = range(rv$data$Date)
+  ))
+}
+
+shinyApp(ui = ui, server = server)
