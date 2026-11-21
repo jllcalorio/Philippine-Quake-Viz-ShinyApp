@@ -243,20 +243,37 @@ plot_metric_trend <- function(df, unit = "month", variable = c("Mag", "Depth_km"
 # Distributions
 # -----------------------------------------------------------------------------
 
+# Axis breaks at whole numbers only (counts of events cannot be fractional).
+integer_breaks <- function(limits) {
+  b <- scales::breaks_pretty()(limits)
+  round(b[abs(b - round(b)) < 1e-8])
+}
+
 plot_mag_distribution <- function(df) {
   if (nrow(df) == 0) return(empty_plot())
   counts <- df |> count(Mag = round(Mag, 1), Mag_group)
-  # Bars are drawn from 0.5 (not 1) so that a single event is still visible
-  # on the logarithmic axis.
-  ggplot(counts, aes(xmin = Mag - 0.04, xmax = Mag + 0.04, ymin = 0.5, ymax = n, fill = Mag_group)) +
+  # Totals per magnitude group go in the legend, so groups whose bars are too
+  # short to see on a linear axis (large earthquakes are rare) are still reported.
+  totals <- df |> count(Mag_group, .drop = FALSE)
+  legend_labels <- sprintf("%s: %s %s (%s)", totals$Mag_group, fmt_n(totals$n),
+                           ifelse(totals$n == 1, "event", "events"),
+                           scales::percent(totals$n / sum(totals$n), accuracy = 0.1))
+  names(legend_labels) <- as.character(totals$Mag_group)
+
+  ggplot(counts, aes(xmin = Mag - 0.04, xmax = Mag + 0.04, ymin = 0, ymax = n, fill = Mag_group)) +
     geom_rect() +
-    scale_fill_manual(values = MAG_GROUP_COLORS, name = "Magnitude") +
-    scale_y_log10(labels = scales::label_comma(), breaks = 10^(0:6),
-                  expand = expansion(mult = c(0, 0.05))) +
+    scale_fill_manual(values = MAG_GROUP_COLORS, labels = legend_labels,
+                      name = NULL, drop = FALSE) +
+    guides(fill = guide_legend(nrow = 2, byrow = TRUE)) +
+    # Keep a sensible scale when only a few events are selected.
+    expand_limits(x = c(floor(min(counts$Mag)) - 0.5, ceiling(max(counts$Mag)) + 0.5), y = c(0, 1)) +
+    scale_y_continuous(labels = scales::label_comma(),
+                       breaks = integer_breaks,
+                       expand = expansion(mult = c(0, 0.05))) +
     scale_x_continuous(breaks = 1:9) +
     labs(title = "How many earthquakes of each magnitude?",
-         subtitle = wrap_text("Number of events per 0.1 magnitude step. The y-axis is logarithmic: each gridline is 10 times the one below."),
-         x = "Magnitude", y = "Number of events (log scale)",
+         subtitle = wrap_text("Number of events per 0.1 magnitude step. The legend gives the total for each magnitude group; strong earthquakes are rare, so their bars are very short."),
+         x = "Magnitude", y = "Number of events",
          caption = make_caption(df, "Below about M 2.5, the drop-off mostly shows that small events are harder to detect.")) +
     theme_eq()
 }
@@ -286,7 +303,7 @@ plot_depth_distribution <- function(df) {
     scale_y_reverse(breaks = seq(0, 700, 100)) +
     expand_limits(y = c(0, 100)) +
     scale_x_continuous(labels = scales::label_comma(),
-                       breaks = function(l) { b <- scales::breaks_pretty()(l); b[b == round(b)] },
+                       breaks = integer_breaks,
                        expand = expansion(mult = c(0, 0.05))) +
     labs(title = "How deep are the earthquakes?",
          subtitle = wrap_text("Number of events per 10 km of depth (0 km = surface). The legend gives the total for each depth class; deep earthquakes are rare, so their bars are very short."),
