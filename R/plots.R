@@ -104,16 +104,40 @@ map_extent <- function(df) {
   list(x = range(lon, na.rm = TRUE) + c(-0.5, 0.5), y = range(lat, na.rm = TRUE) + c(-0.5, 0.5))
 }
 
-# Drawing 100,000+ circles takes 15+ seconds, so the map shows at most this many
-# events (the largest ones). The caption says when this happens.
-MAP_MAX_POINTS <- 15000
+# Drawing 100,000+ circles takes several seconds, so the map draws at most this
+# many events. When a selection is larger, it keeps the largest half of that
+# number and an evenly spread sample (by date) of the smaller events, so every
+# magnitude in the selection is still represented. The caption says so.
+MAP_MAX_POINTS <- 30000
 
-# Events actually drawn on the map (valid coordinates, largest MAP_MAX_POINTS),
-# ordered so the largest events are drawn last, on top.
+# Events actually drawn on the map, ordered so the largest are drawn last (on
+# top). Attributes "n_large" / "n_sampled" / "n_small" / "large_min" describe
+# any sampling.
 map_points <- function(df) {
   pts <- df |> filter(Coord_valid)
-  if (nrow(pts) > MAP_MAX_POINTS) pts <- pts |> slice_max(Mag, n = MAP_MAX_POINTS, with_ties = FALSE)
-  pts |> arrange(Mag)
+  n <- nrow(pts)
+  if (n > MAP_MAX_POINTS) {
+    pts <- pts |> arrange(desc(Mag), desc(DateTime))
+    n_large <- MAP_MAX_POINTS %/% 2
+    large <- pts[seq_len(n_large), ]
+    small <- pts[-seq_len(n_large), ] |> arrange(DateTime)
+    keep <- unique(round(seq(1, nrow(small), length.out = MAP_MAX_POINTS - n_large)))
+    sampled <- small[keep, ]
+    pts <- bind_rows(large, sampled)
+    attr_info <- list(n_large = n_large, n_sampled = nrow(sampled), n_small = nrow(small),
+                      large_min = min(large$Mag))
+  } else {
+    attr_info <- NULL
+  }
+  pts <- pts |> arrange(Mag)
+  attr(pts, "sampling") <- attr_info
+  pts
+}
+
+# Whole-number magnitudes spanning the selection, for the size legend.
+magnitude_breaks <- function(mag) {
+  lo <- max(1, floor(min(mag))); hi <- max(lo, floor(max(mag)))
+  seq(lo, hi)
 }
 
 plot_map <- function(df, outline, color_by = c("magnitude", "depth")) {
@@ -121,7 +145,7 @@ plot_map <- function(df, outline, color_by = c("magnitude", "depth")) {
   pts <- map_points(df)
   if (nrow(pts) == 0) return(empty_plot())
   n_invalid <- sum(!df$Coord_valid)
-  n_capped <- sum(df$Coord_valid) - nrow(pts)
+  sampling <- attr(pts, "sampling")
   ext <- map_extent(pts)
 
   if (color_by == "magnitude") {
@@ -138,9 +162,9 @@ plot_map <- function(df, outline, color_by = c("magnitude", "depth")) {
   extra <- c(
     if (color_by == "magnitude") "Each circle is one epicentre. Circle size and colour both show magnitude."
     else "Each circle is one epicentre. Circle size shows magnitude; colour shows depth.",
-    if (n_capped > 0) sprintf(
-      "For speed, only the %s largest events are drawn (%s smaller ones hidden). Raise the minimum magnitude or narrow the dates to see all events.",
-      fmt_n(nrow(pts)), fmt_n(n_capped)),
+    if (!is.null(sampling)) sprintf(
+      "For speed, the map draws the %s largest events (M %.1f and above) and an evenly spread sample of %s of the other %s. Raise the minimum magnitude or narrow the dates to draw every event.",
+      fmt_n(sampling$n_large), sampling$large_min, fmt_n(sampling$n_sampled), fmt_n(sampling$n_small)),
     if (n_invalid > 0) sprintf("%s event(s) with invalid coordinates are not shown.", fmt_n(n_invalid))
   )
 
@@ -150,7 +174,7 @@ plot_map <- function(df, outline, color_by = c("magnitude", "depth")) {
     geom_point(data = pts, aes(Longitude, Latitude, size = Mag, fill = Fill),
                shape = 21, colour = "white", stroke = 0.15, alpha = 0.85) +
     fill_scale +
-    scale_size(range = c(0.6, 7), limits = c(1, 8.5), breaks = c(3, 4, 5, 6, 7),
+    scale_size(range = c(1, 7), limits = c(1, 8.5), breaks = magnitude_breaks(df$Mag),
                name = "Magnitude (size)") +
     guides(fill = guide_legend(override.aes = list(size = 4.5, alpha = 1), order = 1),
            size = guide_legend(override.aes = list(fill = "#8a8984"), order = 2)) +
