@@ -53,8 +53,8 @@ fmt_n <- function(x) format(x, big.mark = ",", scientific = FALSE, trim = TRUE)
 # One-line description of what is plotted, appended to every caption.
 describe_selection <- function(df) {
   if (nrow(df) == 0) return("No events match the current filters.")
-  sprintf("%s events, %s to %s, magnitude %.1f to %.1f.",
-          fmt_n(nrow(df)), format(min(df$Date), "%d %b %Y"),
+  sprintf("%s %s, %s to %s, magnitude %.1f to %.1f.",
+          fmt_n(nrow(df)), if (nrow(df) == 1) "event" else "events", format(min(df$Date), "%d %b %Y"),
           format(max(df$Date), "%d %b %Y"), min(df$Mag), max(df$Mag))
 }
 
@@ -268,16 +268,29 @@ plot_depth_distribution <- function(df) {
     mutate(Depth_bin = floor(Depth_km / 10) * 10 + 5) |>
     count(Depth_bin) |>
     mutate(Depth_class = classify_depth(Depth_bin))
-  ggplot(counts, aes(xmin = 0.5, xmax = n, ymin = Depth_bin - 4.25, ymax = Depth_bin + 4.25,
+  # Totals per depth class go in the legend, so classes whose bars are too
+  # short to see on a linear axis (deep events are rare) are still reported.
+  totals <- d |>
+    mutate(Depth_class = classify_depth(Depth_km)) |>
+    count(Depth_class, .drop = FALSE)
+  legend_labels <- sprintf("%s: %s %s (%s)", totals$Depth_class, fmt_n(totals$n),
+                           ifelse(totals$n == 1, "event", "events"),
+                           scales::percent(totals$n / sum(totals$n), accuracy = 0.1))
+  names(legend_labels) <- as.character(totals$Depth_class)
+
+  ggplot(counts, aes(xmin = 0, xmax = n, ymin = Depth_bin - 4.25, ymax = Depth_bin + 4.25,
                      fill = Depth_class)) +
     geom_rect() +
-    scale_fill_manual(values = DEPTH_CLASS_COLORS, name = "Depth class", drop = FALSE) +
+    scale_fill_manual(values = DEPTH_CLASS_COLORS, labels = legend_labels,
+                      name = NULL, drop = FALSE) +
     scale_y_reverse(breaks = seq(0, 700, 100)) +
-    scale_x_log10(labels = scales::label_comma(), breaks = 10^(0:6),
-                  expand = expansion(mult = c(0, 0.05))) +
+    expand_limits(y = c(0, 100)) +
+    scale_x_continuous(labels = scales::label_comma(),
+                       breaks = function(l) { b <- scales::breaks_pretty()(l); b[b == round(b)] },
+                       expand = expansion(mult = c(0, 0.05))) +
     labs(title = "How deep are the earthquakes?",
-         subtitle = wrap_text("Number of events per 10 km of depth (0 km = surface). The x-axis is logarithmic."),
-         x = "Number of events (log scale)", y = "Depth (km)",
+         subtitle = wrap_text("Number of events per 10 km of depth (0 km = surface). The legend gives the total for each depth class; deep earthquakes are rare, so their bars are very short."),
+         x = "Number of events", y = "Depth (km)",
          caption = make_caption(d, "Events with no reported depth are excluded.")) +
     theme_eq()
 }

@@ -77,6 +77,11 @@ ui <- page_navbar(
     .about h3 { margin-top: 1.5rem; }
     .about li { margin-bottom: .25rem; }
     .about table { font-size: .9rem; }
+    /* Dropdown filters in table headers: wide enough for province and source names */
+    table.dataTable thead .selectize-dropdown { width: auto !important; min-width: 16rem !important; }
+    table.dataTable thead .selectize-dropdown .option { white-space: nowrap; }
+    /* Open the menus of the last columns to the left so they stay inside the table */
+    table.dataTable thead td:nth-last-child(-n+4) .selectize-dropdown { left: auto !important; right: 0; }
   "))),
 
   sidebar = sidebar(
@@ -213,7 +218,7 @@ ui <- page_navbar(
         "Offshore events count toward the province of the nearest reference town.",
         "\"Share of events\" is the share of all events in the current selection."
       ),
-      DTOutput("province_table", fill = FALSE)
+      div(style = "overflow-x: auto;", DTOutput("province_table", fill = FALSE))
     )
   ),
 
@@ -236,7 +241,7 @@ ui <- page_navbar(
         "cleaned data set, including any events you added from PHIVOLCS. Column",
         "definitions are in About & methods."
       ),
-      DTOutput("data_table", fill = FALSE)
+      div(style = "overflow-x: auto;", DTOutput("data_table", fill = FALSE))
     )
   ),
 
@@ -481,7 +486,7 @@ server <- function(input, output, session) {
     tbl <- summarise_by_province(filtered())
     if ("Message" %in% names(tbl)) return(datatable(tbl, rownames = FALSE, options = list(dom = "t")))
     datatable(tbl, rownames = FALSE, filter = "top",
-              options = list(pageLength = 15, scrollX = TRUE)) |>
+              options = list(pageLength = 15)) |>
       formatRound("Events", 0) |>
       formatPercentage("Share of events", 1) |>
       formatRound("Largest magnitude", 1) |>
@@ -503,13 +508,17 @@ server <- function(input, output, session) {
         `Reference location` = sprintf("%s km %s of %s", Distance_to_Reference_km,
                                        coalesce(Direction_to_Reference, "?"),
                                        coalesce(City_Municipality, "?")),
-        Province = Province,
+        # Factors get a dropdown filter in the table header.
+        Province = factor(Province),
         `Island group` = Island_group,
         `Coordinates valid` = ifelse(Coord_valid, "Yes", "No"),
-        Source = Source
+        Source = factor(Source)
       )
+    # No scrollX: DataTables' scrollX clones the header, and DT then attaches
+    # two range sliders to each numeric/date filter. The wrapping div in the
+    # UI scrolls horizontally instead.
     datatable(d, rownames = FALSE, filter = "top",
-              options = list(pageLength = 25, scrollX = TRUE, order = list())) |>
+              options = list(pageLength = 25, autoWidth = FALSE, order = list())) |>
       formatRound("Magnitude", 1)
   }, server = TRUE)
 
