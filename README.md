@@ -50,18 +50,29 @@ automatically after each month ends. The Philippine coastline
 `R/data_prep.R` applies the same documented steps to the bundled data and to
 any newly downloaded events. The app reports the effect of each step on the
 *About & methods* tab. Because the current `default_data.csv` was exported from
-the app, it is already cleaned and most steps report 0 there. The counts below
-are from the original scrape (1 January 2017 to 27 June 2026, 133,992 raw rows):
+the app, it is already cleaned and most steps report 0 there.
+
+The counts below are for the raw data behind the current `default_data.csv`:
+the original scrape (1 January 2017 to 27 June 2026, 133,992 rows) plus the
+events published by PHIVOLCS from then to 21 November 2026, 00:26 PhST
+(10,621 rows), **144,613 raw rows in total**, of which **144,553** remain after
+cleaning.
 
 | Step | Records | Action |
 |---|---:|---|
+| Missing or invalid date or magnitude | 0 | Removed |
 | Time of day not recorded | 8 | Kept |
-| Exact duplicate records | 54 | Removed |
-| Province name corrected | 7,555 | Corrected |
+| Exact duplicate records | 60 | Removed |
+| Province name corrected | 9,250 | Corrected |
+| Province could not be identified | 0 | Set to missing |
 | Depth placeholder `0.00001` km (originally `--` or `<001`) | 19 | Set to missing |
 | Depth deeper than 750 km (physically implausible) | 2 | Set to missing |
 | Coordinates outside the Philippine region | 4 | Kept, not mapped |
-| Coordinates more than 300 km from the stated reference location | 15 | Kept, not mapped |
+| Coordinates more than 300 km from the stated reference location | 16 | Kept, not mapped |
+
+Of the 9,250 province corrections, 7,555 are in the original scrape and 1,695
+are in the newer events. The newer ones only standardise capitalisation, as
+the PHIVOLCS website writes e.g. *Surigao Del Sur* for *Surigao del Sur*.
 
 Province corrections include:
 
@@ -174,37 +185,7 @@ month at 09:00 Philippine time, it:
 PHIVOLCS publishes a month's archive a few days after the month ends, so the
 early runs may find nothing yet and simply stop. Once the data is updated, the
 remaining runs find no change and stop too. **If anything fails, nothing is
-changed**: the app keeps running on the previous data and GitHub e-mails you.
-The run's page (*Actions* tab) explains what went wrong.
-
-You can also run it by hand: **Actions → Monthly data refresh → Run workflow**.
-Tick *Redeploy the app* to deploy code changes without waiting for new data.
-To check the data on your own computer without changing anything, run
-`Rscript scripts/refresh_data.R --dry-run`.
-
-### One-time setup
-
-1. On <https://www.shinyapps.io>, open **Account → Tokens**, click **Show** on
-   a token (or **Add Token**), then **Show secret**. Note the account name,
-   token and secret.
-2. On GitHub, open the repository's **Settings → Secrets and variables →
-   Actions → New repository secret** and add three secrets:
-   `SHINYAPPS_ACCOUNT`, `SHINYAPPS_TOKEN`, `SHINYAPPS_SECRET`.
-3. *(Optional)* To deploy to a different app name, add a repository
-   **variable** (same page, *Variables* tab) named `SHINYAPPS_APP_NAME`.
-   The default is `philippine-quake-viz-shinyapp`.
-4. Run the workflow once by hand (with *Redeploy the app* ticked) to confirm it works.
-
-Without the secrets, the workflow still updates the data in the repository but
-does not deploy.
-
-### Working on the app after this is set up
-
-The workflow commits to `main`, so your local copy falls behind after each
-monthly update. **Pull before you start working** (`git pull`, or *Pull* in
-GitHub Desktop / RStudio). Do not edit `default_data.csv` by hand; if you have
-uncommitted changes to it, `git pull` will refuse to run until you discard
-them (`git checkout -- default_data.csv`).
+changed**: the app keeps running on the previous data.
 
 ## How to cite
 
